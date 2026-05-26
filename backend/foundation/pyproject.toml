@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocr-foundation"
+version = "0.1.0"
+description = "Internal foundation operators for OCR and document parsing."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+vision = []
+document = []
+paddle-api = ["fastapi>=0.100.0", "uvicorn>=0.23.0"]
+ray = ["ray[default]>=2.10.0,<2.43.0"]
+
+[dependency-groups]
+dev = ["pytest>=9.0.0", "ruff>=0.10.0"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["platform_foundation*"]

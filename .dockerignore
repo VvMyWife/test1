@@ -1,0 +1,27 @@
+.git
+.ruff_cache
+**/__pycache__/
+**/*.py[cod]
+*.rar
+*.tar
+*.tar.gz
+*.zip
+
+# Runtime data should be mounted, not baked into the image.
+data/
+input/
+output*/
+test*/
+bench*/
+summary/
+logs/
+run/
+.cache/
+scratch/
+
+# Local virtual environments and editor state.
+.venv/
+venv/
+node_modules/
+.vscode/
+.idea/

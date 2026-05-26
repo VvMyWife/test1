@@ -1,0 +1,43 @@
+# Shared DTOs / Protocols live here.
+
+from .pdf_items import (
+    ArchiveJobItem,
+    ArtifactRef,
+    BboxQuad,
+    BoundingBox,
+    ConfidenceScore,
+    CoordSpace,
+    DPI,
+    DocumentItem,
+    DocumentResultItem,
+    ImageSize,
+    PageItem,
+    ParsedPage,
+    ParsedPdf,
+    ProvenanceMin,
+    SensitiveSpanItem,
+    TableBlock,
+    TableCell,
+    TextBlock,
+)
+
+__all__ = [
+    "ArchiveJobItem",
+    "ArtifactRef",
+    "BboxQuad",
+    "BoundingBox",
+    "ConfidenceScore",
+    "CoordSpace",
+    "DPI",
+    "DocumentItem",
+    "DocumentResultItem",
+    "ImageSize",
+    "PageItem",
+    "ParsedPage",
+    "ParsedPdf",
+    "ProvenanceMin",
+    "SensitiveSpanItem",
+    "TableBlock",
+    "TableCell",
+    "TextBlock",
+]

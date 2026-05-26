@@ -1,0 +1,41 @@
+﻿# Runtime data and outputs
+/data/*
+!/data/input/
+/data/input/*
+!/data/input/.gitkeep
+/output/*
+!/output/.gitkeep
+/output*/
+/test*/
+/bench*/
+/summary/
+/logs/
+/run/
+/.cache/
+/scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Archives and local files
+*.tar
+*.tar.gz
+*.zip
+*.rar
+*.log
+*.pid
+.env
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
