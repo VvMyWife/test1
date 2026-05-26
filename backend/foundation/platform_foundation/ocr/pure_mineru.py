@@ -148,7 +148,7 @@ def _build_mineru_options(
     if resolved_table_engine == "paddle":
         options.setdefault("enable_table_cell_refine", True)
         options.setdefault("enable_paddle_table_refine", True)
-        options.setdefault("table_cell_refine_fail_open", False)
+        options.setdefault("table_cell_refine_fail_open", True)
         options.setdefault("emit_table_cells_as_text_blocks", False)
         options.setdefault("paddle_table_mode", paddle_table_mode)
         if paddle_device:
