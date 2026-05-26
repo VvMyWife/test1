@@ -28,11 +28,14 @@ from platform_foundation.inference import (
 from platform_foundation.inference.mineru import (
     MinerUDocumentParseResult,
     MinerUPageResult,
+    _build_paddle_table_service,
     _coerce_local_file_path,
     _maybe_refine_table_cells_with_paddle,
     _merge_table_result,
 )
 from platform_foundation.inference.paddle_table import (
+    PaddleTableApiClient,
+    PaddleTableStructureService,
     PaddleTableStructureError,
     PaddleTableStructureResult,
     parse_paddle_structure_tables,
@@ -521,6 +524,19 @@ def test_paddle_table_refine_failure_falls_back_to_mineru_result(
     assert warning["success"] is False
     assert warning["fail_open"] is True
     assert "table cell refinement failed" in warning["error"]
+
+
+def test_paddle_table_service_defaults_to_resident_api() -> None:
+    service = _build_paddle_table_service({})
+
+    assert isinstance(service, PaddleTableApiClient)
+    assert service.api_url == "http://127.0.0.1:8200"
+
+
+def test_paddle_table_service_can_use_local_process_when_explicit() -> None:
+    service = _build_paddle_table_service({"paddle_table_use_local": True})
+
+    assert isinstance(service, PaddleTableStructureService)
 
 
 def test_layout_extract_mineru_operator_fans_out_document_into_pages() -> None:
