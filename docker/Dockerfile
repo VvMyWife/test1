@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # CUDA 11.8 is the conservative default for older NVIDIA drivers such as 535.xx.
 # The image intentionally uses two Python virtualenvs:
 # - /opt/venvs/mineru: MinerU + Torch + platform_foundation
@@ -7,7 +5,8 @@
 #
 # Keeping Paddle and Torch in separate environments avoids the cuDNN/NCCL wheel
 # conflicts seen when installing both stacks into a single Python environment.
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:11.8.0-runtime-ubuntu22.04
+FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple

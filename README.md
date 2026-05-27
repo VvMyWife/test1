@@ -46,9 +46,18 @@ docker build -t mineru-operator:latest -f docker/Dockerfile .
 
 ```bash
 docker build -t mineru-operator:latest -f docker/Dockerfile \
+  --build-arg BASE_IMAGE=nvidia/cuda:11.8.0-runtime-ubuntu22.04 \
   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
   --build-arg PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu118 \
   --build-arg PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu118/ \
+  .
+```
+
+如果服务器已经有可用 CUDA 基础镜像，也可以复用，避免重新拉 Docker Hub：
+
+```bash
+docker build -t mineru-operator:latest -f docker/Dockerfile \
+  --build-arg BASE_IMAGE=mineru:latest \
   .
 ```
 
