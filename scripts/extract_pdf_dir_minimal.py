@@ -4,22 +4,30 @@ from pathlib import Path
 from platform_foundation.ocr import extract_pdf_dir
 
 
-WORKSPACE = Path(os.environ.get("MINERU_WORKSPACE", Path(__file__).resolve().parents[1]))
+WORKSPACE = Path(
+    os.environ.get("MINERU_WORKSPACE")
+    or os.environ.get("WORKSPACE")
+    or Path(__file__).resolve().parents[1]
+).expanduser().resolve()
 TABLE_ENGINE = os.environ.get("TABLE_ENGINE", "ocr").strip().lower()
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "12"))
+DEFAULT_INPUT_DIR = WORKSPACE / "input"
+if not DEFAULT_INPUT_DIR.exists():
+    DEFAULT_INPUT_DIR = WORKSPACE / "data" / "input"
+INPUT_DIR = Path(os.environ.get("INPUT_DIR", str(DEFAULT_INPUT_DIR))).expanduser().resolve()
 OUTPUT_DIR = Path(
     os.environ.get(
         "OUTPUT_DIR",
-        str(WORKSPACE / f"output_dir_{TABLE_ENGINE}_{CONCURRENCY}"),
+        str(WORKSPACE / "output" / f"{TABLE_ENGINE}_{CONCURRENCY}"),
     )
-)
+).expanduser().resolve()
 
 os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:8000")
 if TABLE_ENGINE == "paddle":
     os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:8200")
 
 report = extract_pdf_dir(
-    WORKSPACE / "data" / "input",
+    INPUT_DIR,
     output_dir=OUTPUT_DIR,
     table_engine=TABLE_ENGINE,
     concurrency=CONCURRENCY,

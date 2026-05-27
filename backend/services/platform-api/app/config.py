@@ -7,7 +7,7 @@ import shlex
 
 from platform_foundation.inference import MinerUCliConfig
 
-DEFAULT_WORKSPACE_ROOT = "/home/kaifang/mineru_workspace"
+DEFAULT_WORKSPACE_ROOT = "/workspace"
 DEFAULT_DATA_ROOT = f"{DEFAULT_WORKSPACE_ROOT}/data"
 DEFAULT_LOG_ROOT = f"{DEFAULT_WORKSPACE_ROOT}/logs"
 DEFAULT_MINERU_API_URL = "http://127.0.0.1:8000"

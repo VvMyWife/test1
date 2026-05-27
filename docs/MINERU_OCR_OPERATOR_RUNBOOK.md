@@ -10,8 +10,8 @@
 from platform_foundation.ocr import extract_pdf
 
 result = extract_pdf(
-    "/home/kaifang/mineru_workspace/input/doc-001.pdf",
-    output_dir="/home/kaifang/mineru_workspace/output/doc-001",
+    "$WORKSPACE/input/doc-001.pdf",
+    output_dir="$WORKSPACE/output/doc-001",
     api_url="http://127.0.0.1:8000",
     timeout_seconds=1800,
 )
@@ -20,10 +20,10 @@ result = extract_pdf(
 Daft 批处理脚本也支持命令行超时：
 
 ```bash
-python /home/kaifang/mineru_workspace/platform-core-public-feature-foundation-base-operator/scripts/run-daft-batch-operate.py \
+python $WORKSPACE/platform-core-public-feature-foundation-base-operator/scripts/run-daft-batch-operate.py \
   --api-url http://127.0.0.1:8000 \
-  --input-dir /home/kaifang/mineru_workspace/input \
-  --output-dir /home/kaifang/mineru_workspace/output \
+  --input-dir $WORKSPACE/input \
+  --output-dir $WORKSPACE/output \
   --timeout-seconds 1800
 ```
 
@@ -52,13 +52,13 @@ python /home/kaifang/mineru_workspace/platform-core-public-feature-foundation-ba
 
 ```json
 {
-  "pdf_path": "/home/kaifang/mineru_workspace/input/bad.pdf",
+  "pdf_path": "$WORKSPACE/input/bad.pdf",
   "success": false,
   "elapsed_seconds": 123.456,
   "error_type": "OperatorError",
   "error": "MinerU timed out while extracting layout",
   "timeout_seconds": 1800,
-  "error_report": "/home/kaifang/mineru_workspace/output/bad.error.json"
+  "error_report": "$WORKSPACE/output/bad.error.json"
 }
 ```
 
@@ -155,7 +155,7 @@ python /home/kaifang/mineru_workspace/platform-core-public-feature-foundation-ba
 
 | 路径 | 用途 |
 | --- | --- |
-| `/home/kaifang/mineru_workspace/logs/mineru-api-8000.log` | 常驻 MinerU API 日志，具体以部署脚本为准 |
+| `$WORKSPACE/logs/mineru-api-8000.log` | 常驻 MinerU API 日志，具体以部署脚本为准 |
 | `<output_dir>/batch_report.json` | Daft 批处理总报告 |
 | `<output_dir>/failed_files.jsonl` | 失败文件清单 |
 | `<output_dir>/<pdf_name>/**/_middle.json` | MinerU 中间结构 |
@@ -175,7 +175,7 @@ python /home/kaifang/mineru_workspace/platform-core-public-feature-foundation-ba
 常用检查命令：
 
 ```bash
-tail -n 100 /home/kaifang/mineru_workspace/logs/mineru-api-8000.log
-cat /home/kaifang/mineru_workspace/output/failed_files.jsonl
-find /home/kaifang/mineru_workspace/output -name "*.error.json" -print
+tail -n 100 $WORKSPACE/logs/mineru-api-8000.log
+cat $WORKSPACE/output/failed_files.jsonl
+find $WORKSPACE/output -name "*.error.json" -print
 ```

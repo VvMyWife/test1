@@ -1,38 +1,44 @@
-# MinerU Docker 使用说明
+# Docker 即插即用部署
 
-目标：把 MinerU OCR 算子做成可迁移的 Docker 模块。目标服务器只需要 Docker、NVIDIA 驱动和 nvidia-container-toolkit；Python、MinerU、Torch、Paddle、Daft、`platform_foundation` 都在镜像内部。
+目标：把 MinerU OCR 算子做成可迁移 Docker 模块。目标服务器只需要 Docker、NVIDIA 驱动和 nvidia-container-toolkit；Python、MinerU、Torch、Paddle、Daft、`platform_foundation` 都在镜像内部。
 
-## 1. 目标服务器前置条件
+## 1. 前置检查
 
 ```bash
 nvidia-smi
 docker --version
 docker compose version
-```
-
-GPU 容器必须能看到显卡：
-
-```bash
 docker run --rm --gpus all nvidia/cuda:11.8.0-runtime-ubuntu22.04 nvidia-smi
 ```
 
-如果这一步失败，先安装或修复 `nvidia-container-toolkit`，否则 MinerU/Paddle 都无法使用 GPU。
+如果最后一条失败，先修复 GPU Docker 运行时。
 
-## 2. 构建镜像
+## 2. 准备目录
 
-进入项目根目录：
+在项目根目录执行：
 
 ```bash
-cd /home/<user>/mineru_workspace/platform-core-public-feature-foundation-base-operator
+mkdir -p data/input output logs run .cache/mineru-operator
+cp your.pdf data/input/
 ```
 
-构建镜像：
+不要在代码里写服务器绝对路径。所有宿主路径都通过 Docker bind mount 映射到容器固定路径：
+
+```text
+data/input              -> /workspace/input
+output                  -> /workspace/output
+.cache/mineru-operator  -> /workspace/.cache
+logs                    -> /workspace/logs
+run                     -> /workspace/run
+```
+
+## 3. 构建
 
 ```bash
 docker build -t mineru-operator:latest -f docker/Dockerfile .
 ```
 
-国内网络可以显式指定镜像源：
+国内网络：
 
 ```bash
 docker build -t mineru-operator:latest -f docker/Dockerfile \
@@ -42,218 +48,138 @@ docker build -t mineru-operator:latest -f docker/Dockerfile \
   .
 ```
 
-说明：镜像里用了两个 Python 虚拟环境：
+镜像使用 CUDA 11.8 运行时，目的是兼容更多服务器驱动。MinerU/Torch 和 Paddle 分别装在两个 venv 里，避免依赖冲突。
 
-- `/opt/venvs/mineru`：MinerU + Torch + 算子代码。
-- `/opt/venvs/paddle`：PaddleOCR + Paddle GPU + Paddle Table API。
-
-这样做是为了避免 Torch 和 Paddle 在同一个 Python 环境里互相覆盖 cuDNN/NCCL 依赖。
-
-## 3. 准备输入输出目录
+## 4. 常驻服务
 
 ```bash
-mkdir -p /home/<user>/mineru_docker/input
-mkdir -p /home/<user>/mineru_docker/output
-cp /home/<user>/mineru_workspace/data/input/5.pdf /home/<user>/mineru_docker/input/
+docker compose up -d --build
 ```
 
-## 4. 启动纯 MinerU/OCR 服务
+默认会启动：
 
-```bash
-docker run -d --name mineru-operator \
-  --gpus all \
-  --shm-size 8g \
-  -p 8000:8000 \
-  -v /home/<user>/mineru_docker/input:/workspace/input \
-  -v /home/<user>/mineru_docker/output:/workspace/output \
-  -v mineru-cache:/workspace/.cache \
-  -v mineru-logs:/workspace/logs \
-  mineru-operator:latest
+```text
+MinerU API:       http://127.0.0.1:8000
+Paddle Table API: http://127.0.0.1:8200
 ```
 
-检查服务：
-
-```bash
-docker logs -f mineru-operator
-curl http://127.0.0.1:8000/health
-```
-
-## 5. 在容器里跑目录批处理
-
-OCR 模式：
-
-```bash
-docker exec mineru-operator \
-  /opt/venvs/mineru/bin/python /opt/mineru_workspace/scripts/run-daft-batch-operate.py \
-  /workspace/input \
-  --output-dir /workspace/output \
-  --table-engine ocr \
-  --concurrency 2 \
-  --overwrite
-```
-
-查看结果：
-
-```bash
-ls -lh /home/<user>/mineru_docker/output
-cat /home/<user>/mineru_docker/output/batch_report.json
-```
-
-报告里会有：
-
-```json
-{
-  "pdf_count": 1,
-  "page_count": 10,
-  "pages_per_second": 2.672
-}
-```
-
-## 6. 启动 Paddle 表格增强
-
-Paddle API 默认不启动，因为会占显存、启动慢。需要 Paddle 时重新启动容器：
-
-```bash
-docker rm -f mineru-operator
-
-docker run -d --name mineru-operator \
-  --gpus all \
-  --shm-size 8g \
-  -e ENABLE_PADDLE_API=true \
-  -p 8000:8000 \
-  -p 8200:8200 \
-  -v /home/<user>/mineru_docker/input:/workspace/input \
-  -v /home/<user>/mineru_docker/output:/workspace/output \
-  -v mineru-cache:/workspace/.cache \
-  -v mineru-logs:/workspace/logs \
-  mineru-operator:latest
-```
-
-检查：
+验证：
 
 ```bash
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8200/health
 ```
 
-Paddle 模式建议先小并发：
+只跑 OCR、不开 Paddle：
 
 ```bash
-docker exec mineru-operator \
-  /opt/venvs/mineru/bin/python /opt/mineru_workspace/scripts/run-daft-batch-operate.py \
+ENABLE_PADDLE_API=false docker compose up -d --build
+```
+
+## 5. 跑 OCR
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
   /workspace/input \
-  --output-dir /workspace/output_paddle \
-  --table-engine paddle \
-  --concurrency 1 \
-  --limit 1 \
+  --output-dir /workspace/output/ocr \
+  --table-engine ocr \
+  --concurrency 12 \
   --overwrite
 ```
 
-## 7. 一次性批处理模式
+## 6. 跑 Paddle
 
-不想长期启动服务，也可以让容器启动服务后直接跑批处理：
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input \
+  --output-dir /workspace/output/paddle \
+  --table-engine paddle \
+  --concurrency 2 \
+  --overwrite
+```
+
+Paddle 模式必须看到 `table_cell_count > 0` 才说明表格增强真正生效。算子不会把 Paddle 失败伪装成 OCR 成功。
+
+## 7. 单文件
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input/5.pdf \
+  --output-dir /workspace/output/single_paddle \
+  --table-engine paddle \
+  --overwrite
+```
+
+## 8. 一次性处理
 
 ```bash
 docker run --rm \
   --gpus all \
   --shm-size 8g \
-  -v /home/<user>/mineru_docker/input:/workspace/input \
-  -v /home/<user>/mineru_docker/output:/workspace/output \
-  -v mineru-cache:/workspace/.cache \
+  -e TABLE_ENGINE=ocr \
+  -e CONCURRENCY=12 \
+  -v ./data/input:/workspace/input \
+  -v ./output:/workspace/output \
+  -v ./.cache/mineru-operator:/workspace/.cache \
+  -v ./logs:/workspace/logs \
   mineru-operator:latest \
-  batch /workspace/input --output-dir /workspace/output --table-engine ocr --concurrency 2 --overwrite
+  batch
 ```
 
-Paddle 一次性批处理：
+Paddle:
 
 ```bash
 docker run --rm \
   --gpus all \
   --shm-size 8g \
-  -e ENABLE_PADDLE_API=true \
-  -v /home/<user>/mineru_docker/input:/workspace/input \
-  -v /home/<user>/mineru_docker/output:/workspace/output_paddle \
-  -v mineru-cache:/workspace/.cache \
+  -e TABLE_ENGINE=paddle \
+  -e CONCURRENCY=2 \
+  -v ./data/input:/workspace/input \
+  -v ./output:/workspace/output \
+  -v ./.cache/mineru-operator:/workspace/.cache \
+  -v ./logs:/workspace/logs \
   mineru-operator:latest \
-  batch /workspace/input --output-dir /workspace/output_paddle --table-engine paddle --concurrency 1 --limit 1 --overwrite
+  batch
 ```
 
-## 8. docker compose
+## 9. 迁移到其他服务器
 
-项目根目录已经提供 `docker-compose.yml`：
+导出镜像：
 
 ```bash
-cd /home/<user>/mineru_workspace/platform-core-public-feature-foundation-base-operator
-mkdir -p data output
-cp /home/<user>/mineru_workspace/data/input/5.pdf data/
-docker compose up -d --build
-curl http://127.0.0.1:8000/health
+docker save mineru-operator:latest | gzip > mineru-operator-image.tar.gz
 ```
 
-运行批处理：
+可选：导出模型缓存，避免目标服务器首次运行重新下载模型：
 
 ```bash
-docker compose exec mineru-operator \
-  /opt/venvs/mineru/bin/python /opt/mineru_workspace/scripts/run-daft-batch-operate.py \
-  /workspace/input --output-dir /workspace/output --table-engine ocr --concurrency 2 --overwrite
+tar -czf mineru-operator-cache.tar.gz .cache/mineru-operator
 ```
 
-启用 Paddle：
+目标服务器导入：
 
 ```bash
-ENABLE_PADDLE_API=true docker compose up -d --build
+docker load -i mineru-operator-image.tar.gz
+tar -xzf mineru-operator-cache.tar.gz
+docker compose up -d
 ```
 
-`docker-compose.yml` 已经使用 `${ENABLE_PADDLE_API:-false}`，所以这条命令会直接覆盖默认值。
+## 10. 排查
 
-## 9. 常见问题
-
-### ModuleNotFoundError: platform_foundation
-
-Docker 镜像里不会出现这个问题，因为构建时已经执行：
+GPU：
 
 ```bash
-pip install -e /opt/mineru_workspace/backend/foundation
-```
-
-裸机部署才需要手动安装：
-
-```bash
-cd backend/foundation
-python -m pip install -e .
-```
-
-### Paddle 很慢
-
-先确认容器里 Paddle 是 GPU 版：
-
-```bash
-docker exec mineru-operator /opt/venvs/paddle/bin/python - <<'PY'
+docker compose exec mineru-operator nvidia-smi
+docker compose exec mineru-operator /opt/venvs/paddle/bin/python - <<'PY'
 import paddle
-print(paddle.__version__)
 print(paddle.device.is_compiled_with_cuda())
 print(paddle.device.get_device())
 PY
 ```
 
-必须看到 `True` 和 `gpu:0`。
-
-### 目标服务器显存小
-
-Paddle 模式先用：
+日志：
 
 ```bash
---concurrency 1 --limit 1
+docker compose exec mineru-operator tail -n 100 /workspace/logs/mineru-api-8000.log
+docker compose exec mineru-operator tail -n 100 /workspace/logs/paddle-table-api-8200.log
 ```
-
-确认稳定后再逐步提高。
-
-### 首次运行很慢
-
-首次运行会下载 MinerU/Paddle 模型。建议保留这个卷：
-
-```bash
--v mineru-cache:/workspace/.cache
-```
-
-后续容器重建也能复用模型缓存。

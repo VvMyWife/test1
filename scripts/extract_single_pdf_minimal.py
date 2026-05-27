@@ -1,15 +1,31 @@
+import os
 from pathlib import Path
 
 from platform_foundation.ocr import extract_pdf_file
 
 
-WORKSPACE = Path(__file__).resolve().parents[1]
+WORKSPACE = Path(
+    os.environ.get("MINERU_WORKSPACE")
+    or os.environ.get("WORKSPACE")
+    or Path(__file__).resolve().parents[1]
+).expanduser().resolve()
+TABLE_ENGINE = os.environ.get("TABLE_ENGINE", "ocr").strip().lower()
+DEFAULT_INPUT_PDF = WORKSPACE / "input" / "5.pdf"
+if not DEFAULT_INPUT_PDF.exists():
+    DEFAULT_INPUT_PDF = WORKSPACE / "data" / "input" / "5.pdf"
+INPUT_PDF = Path(os.environ.get("INPUT_PDF", str(DEFAULT_INPUT_PDF))).expanduser().resolve()
+OUTPUT_DIR = Path(
+    os.environ.get("OUTPUT_DIR", str(WORKSPACE / "output" / f"single_{TABLE_ENGINE}"))
+).expanduser().resolve()
 
-# Fast path: pure MinerU OCR. No Paddle table API or operator max_inflight cap is required.
+os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:8000")
+if TABLE_ENGINE == "paddle":
+    os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:8200")
+
 result = extract_pdf_file(
-    WORKSPACE / "data" / "input" / "5.pdf",
-    output_dir=WORKSPACE / "output_single_ocr_minimal",
-    table_engine="ocr",
+    INPUT_PDF,
+    output_dir=OUTPUT_DIR,
+    table_engine=TABLE_ENGINE,
     overwrite=True,
 )
 

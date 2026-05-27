@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKSPACE_ROOT="${PLATFORM_WORKSPACE_ROOT:-/home/liujiacheng/mineru_workspace}"
-CONDA_SH="${CONDA_SH:-/home/liujiacheng/miniconda3/etc/profile.d/conda.sh}"
+WORKSPACE_ROOT="${PLATFORM_WORKSPACE_ROOT:-$(pwd)}"
+CONDA_SH="${CONDA_SH:-${HOME}/miniconda3/etc/profile.d/conda.sh}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-mineru312}"
 
 if [ -f "$CONDA_SH" ]; then

@@ -6,12 +6,12 @@ from app.config import load_settings_from_env
 def test_load_settings_from_env_keeps_portable_defaults() -> None:
     settings = load_settings_from_env({})
 
-    assert settings.workspace_root == "/home/kaifang/mineru_workspace"
-    assert settings.data_root == "/home/kaifang/mineru_workspace/data"
-    assert settings.log_root == "/home/kaifang/mineru_workspace/logs"
-    assert settings.upload_temp_root == "/home/kaifang/mineru_workspace/data"
+    assert settings.workspace_root == "/workspace"
+    assert settings.data_root == "/workspace/data"
+    assert settings.log_root == "/workspace/logs"
+    assert settings.upload_temp_root == "/workspace/data"
     assert settings.mineru_cli.command == ("mineru",)
-    assert settings.mineru_cli.output_root == "/home/kaifang/mineru_workspace/data"
+    assert settings.mineru_cli.output_root == "/workspace/data"
     assert settings.mineru_cli.api_url == "http://127.0.0.1:8000"
     assert settings.mineru_cli.extra_args == ()
 

@@ -9,20 +9,17 @@ services:
     gpus: all
     shm_size: "8gb"
     environment:
-      # Set to true when testing or serving Paddle table refinement.
-      ENABLE_PADDLE_API: "${ENABLE_PADDLE_API:-false}"
+      # Default true so one container can serve both OCR and Paddle modes.
+      ENABLE_PADDLE_API: "${ENABLE_PADDLE_API:-true}"
       MINERU_API_MAX_CONCURRENT_REQUESTS: "${MINERU_API_MAX_CONCURRENT_REQUESTS:-128}"
       MINERU_MODEL_SOURCE: "${MINERU_MODEL_SOURCE:-modelscope}"
       CUDA_VISIBLE_DEVICES: "${CUDA_VISIBLE_DEVICES:-0}"
     ports:
-      - "8000:8000"
-      - "8200:8200"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8200:8200"
     volumes:
-      - ./data:/workspace/input
+      - ./data/input:/workspace/input
       - ./output:/workspace/output
-      - mineru-cache:/workspace/.cache
-      - mineru-logs:/workspace/logs
-
-volumes:
-  mineru-cache:
-  mineru-logs:
+      - ./.cache/mineru-operator:/workspace/.cache
+      - ./logs:/workspace/logs
+      - ./run:/workspace/run

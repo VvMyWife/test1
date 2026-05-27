@@ -103,15 +103,22 @@ trap stop_children EXIT TERM INT
 
 run_batch() {
   start_mineru_api
-  if [[ "${ENABLE_PADDLE_API:-false}" == "true" ]]; then
+  local requested_table_engine="${TABLE_ENGINE:-${MINERU_TABLE_ENGINE:-ocr}}"
+  for arg in "$@"; do
+    if [[ "${arg}" == "paddle" ]]; then
+      requested_table_engine="paddle"
+      break
+    fi
+  done
+  if [[ "${ENABLE_PADDLE_API:-false}" == "true" || "${requested_table_engine}" == "paddle" ]]; then
     start_paddle_api
   fi
   shift || true
   if [[ "$#" -eq 0 ]]; then
     set -- "${WORKSPACE_ROOT}/input" \
-      --output-dir "${WORKSPACE_ROOT}/output" \
-      --table-engine "${TABLE_ENGINE:-ocr}" \
-      --concurrency "${CONCURRENCY:-1}" \
+      --output-dir "${OUTPUT_DIR:-${WORKSPACE_ROOT}/output/${requested_table_engine}}" \
+      --table-engine "${requested_table_engine}" \
+      --concurrency "${CONCURRENCY:-12}" \
       --overwrite
   fi
   cd "${WORKSPACE_ROOT}"

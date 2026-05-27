@@ -22,7 +22,7 @@ from .contracts import Item, Logger, OperatorContext, OperatorError, OperatorSch
 
 
 _LOGGER = logging.getLogger(__name__)
-_DEFAULT_FAILURE_WORKSPACE = "/home/liujiacheng/mineru_workspace"
+_DEFAULT_FAILURE_WORKSPACE = "."
 _SENSITIVE_OPTION_PARTS = ("api_key", "authorization", "password", "secret", "token")
 
 
@@ -430,6 +430,7 @@ class LayoutExtractMinerUOperator(BaseOperator):
             workspace = (
                 os.environ.get("MINERU_WORKSPACE")
                 or os.environ.get("WORKSPACE")
+                or os.environ.get("WORKSPACE_ROOT")
                 or _DEFAULT_FAILURE_WORKSPACE
             )
             configured_dir = str(Path(workspace) / "logs" / "operator_failures")

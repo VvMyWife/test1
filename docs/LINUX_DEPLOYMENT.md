@@ -75,25 +75,25 @@ installed on the server.
 The code now defaults to this workspace:
 
 ```bash
-/home/liujiacheng/mineru_workspace
+$WORKSPACE
 ```
 
 The default data prefix is:
 
 ```bash
-/home/liujiacheng/mineru_workspace/data
+$WORKSPACE/data
 ```
 
 You can still override the defaults with environment variables:
 
 ```bash
-export PLATFORM_WORKSPACE_ROOT="/home/liujiacheng/mineru_workspace"
-export PLATFORM_DATA_ROOT="/home/liujiacheng/mineru_workspace/data"
-export PLATFORM_LOG_ROOT="/home/liujiacheng/mineru_workspace/logs"
-export PLATFORM_UPLOAD_TEMP_ROOT="/home/liujiacheng/mineru_workspace/data"
-export PLATFORM_FOUNDATION_ROOT="/home/liujiacheng/mineru_workspace/backend/foundation"
+export PLATFORM_WORKSPACE_ROOT="$WORKSPACE"
+export PLATFORM_DATA_ROOT="$WORKSPACE/data"
+export PLATFORM_LOG_ROOT="$WORKSPACE/logs"
+export PLATFORM_UPLOAD_TEMP_ROOT="$WORKSPACE/data"
+export PLATFORM_FOUNDATION_ROOT="$WORKSPACE/backend/foundation"
 export MINERU_COMMAND="mineru"
-export MINERU_OUTPUT_ROOT="/home/liujiacheng/mineru_workspace/data"
+export MINERU_OUTPUT_ROOT="$WORKSPACE/data"
 export MINERU_PARSE_METHOD="auto"
 export MINERU_BACKEND="pipeline"
 export MINERU_LANG="ch"
@@ -110,20 +110,20 @@ Because the service directory is named `platform-api`, run Uvicorn from that ser
 ```bash
 cd ~/mineru_workspace/backend/services/platform-api
 
-export PLATFORM_WORKSPACE_ROOT="/home/liujiacheng/mineru_workspace"
-export PLATFORM_DATA_ROOT="/home/liujiacheng/mineru_workspace/data"
-export PLATFORM_LOG_ROOT="/home/liujiacheng/mineru_workspace/logs"
-export PLATFORM_UPLOAD_TEMP_ROOT="/home/liujiacheng/mineru_workspace/data"
-export PLATFORM_FOUNDATION_ROOT="/home/liujiacheng/mineru_workspace/backend/foundation"
+export PLATFORM_WORKSPACE_ROOT="$WORKSPACE"
+export PLATFORM_DATA_ROOT="$WORKSPACE/data"
+export PLATFORM_LOG_ROOT="$WORKSPACE/logs"
+export PLATFORM_UPLOAD_TEMP_ROOT="$WORKSPACE/data"
+export PLATFORM_FOUNDATION_ROOT="$WORKSPACE/backend/foundation"
 export MINERU_COMMAND="mineru"
-export MINERU_OUTPUT_ROOT="/home/liujiacheng/mineru_workspace/data"
+export MINERU_OUTPUT_ROOT="$WORKSPACE/data"
 export MINERU_PARSE_METHOD="auto"
 export MINERU_BACKEND="pipeline"
 export MINERU_LANG="ch"
 export MINERU_TIMEOUT_SECONDS="300"
 export MINERU_EXTRA_ARGS=""
 
-PYTHONPATH="/home/liujiacheng/mineru_workspace/backend/services/platform-api" \
+PYTHONPATH="$WORKSPACE/backend/services/platform-api" \
   uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -134,7 +134,7 @@ This project now includes this new file:
 - `~/mineru_workspace/scripts/start-platform-api.sh`
 
 It will be copied into your existing `scripts` directory when you copy the project contents.
-The script explicitly loads `/home/liujiacheng/miniconda3/etc/profile.d/conda.sh` and activates `mineru312`,
+The script explicitly loads `$CONDA_HOME/etc/profile.d/conda.sh` and activates `mineru312`,
 because non-interactive SSH sessions do not automatically load your shell prompt environment.
 
 Then run:
@@ -149,9 +149,9 @@ chmod +x ~/mineru_workspace/scripts/start-platform-api.sh
 Manual shell logs can be redirected to the existing `logs` directory:
 
 ```bash
-/home/liujiacheng/mineru_workspace/scripts/start-platform-api.sh \
-  > /home/liujiacheng/mineru_workspace/logs/platform-api.log \
-  2> /home/liujiacheng/mineru_workspace/logs/platform-api.err.log
+$WORKSPACE/scripts/start-platform-api.sh \
+  > $WORKSPACE/logs/platform-api.log \
+  2> $WORKSPACE/logs/platform-api.err.log
 ```
 
 ## Smoke test

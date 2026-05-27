@@ -29,7 +29,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_TABLE_API_URL=http://127.0.0.1:8200 \
     PADDLE_TABLE_API_PRELOAD=true \
     PADDLE_TABLE_API_PRELOAD_MODES=table_structure,ppstructurev3 \
-    ENABLE_PADDLE_API=false \
+    ENABLE_PADDLE_API=true \
     XDG_CACHE_HOME=/workspace/.cache \
     HF_HOME=/workspace/.cache/huggingface \
     MODELSCOPE_CACHE=/workspace/.cache/modelscope \
@@ -80,6 +80,7 @@ RUN /opt/venvs/paddle/bin/python -m pip install \
         paddlepaddle-gpu==3.3.1 \
     && /opt/venvs/paddle/bin/python -m pip install \
         -i "${PIP_INDEX_URL}" \
+        "nvidia-cudnn-cu11<9" \
         paddleocr==3.5.0 \
         "paddlex[ocr]==3.5.2" \
         fastapi==0.136.1 \
@@ -91,7 +92,9 @@ COPY . /opt/mineru_workspace
 RUN /opt/venvs/mineru/bin/python -m pip install -e /opt/mineru_workspace/backend/foundation \
     && /opt/venvs/paddle/bin/python -m pip install -e "/opt/mineru_workspace/backend/foundation[paddle-api]" \
     && mkdir -p /workspace/input /workspace/output /workspace/.cache /workspace/logs /workspace/run \
-    && chmod +x /opt/mineru_workspace/docker/entrypoint.sh
+    && chmod +x /opt/mineru_workspace/docker/entrypoint.sh \
+    && chmod +x /opt/mineru_workspace/docker/operator-batch.sh \
+    && ln -sf /opt/mineru_workspace/docker/operator-batch.sh /usr/local/bin/mineru-operator-batch
 
 ENV PATH=/opt/venvs/mineru/bin:${PATH}
 WORKDIR /workspace
@@ -100,5 +103,5 @@ EXPOSE 8000 8200
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/mineru_workspace/docker/entrypoint.sh"]
 CMD ["server"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD /opt/mineru_workspace/docker/entrypoint.sh healthcheck
