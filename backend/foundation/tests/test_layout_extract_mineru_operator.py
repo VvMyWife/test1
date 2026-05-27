@@ -28,18 +28,10 @@ from platform_foundation.inference import (
 from platform_foundation.inference.mineru import (
     MinerUDocumentParseResult,
     MinerUPageResult,
-    _build_paddle_table_service,
     _coerce_local_file_path,
-    _maybe_refine_table_cells_with_paddle,
     _merge_table_result,
 )
-from platform_foundation.inference.paddle_table import (
-    PaddleTableApiClient,
-    PaddleTableStructureService,
-    PaddleTableStructureError,
-    PaddleTableStructureResult,
-    parse_paddle_structure_tables,
-)
+from platform_foundation.inference.paddle_table import PaddleTableStructureResult, parse_paddle_structure_tables
 from platform_foundation.ocr.pure_mineru import _build_mineru_options
 from platform_foundation.operators import OperatorContext, OperatorError
 from platform_foundation.operators.layout_extract_mineru import LayoutExtractMinerUOperator
@@ -458,87 +450,6 @@ def test_merge_table_result_replaces_flat_table_text_by_default() -> None:
     assert page.table_blocks[0].cells[0].text == "new table text"
 
 
-def test_paddle_table_refine_failure_falls_back_to_mineru_result(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    middle_ref = ArtifactRef(kind="middle_json", uri="/tmp/doc_middle.json")
-    original_table = TableBlock(
-        table_id="p0-mineru-t0",
-        page_index=0,
-        provider="mineru",
-        bounding_box=BoundingBox(x=10, y=10, w=100, h=80),
-        cells=[],
-    )
-    parsed = MinerUDocumentParseResult(
-        pages=(
-            MinerUPageResult(
-                page_index=0,
-                text="mineru fallback",
-                text_blocks=(
-                    TextBlock(
-                        text="mineru fallback",
-                        bounding_box=BoundingBox(x=10, y=10, w=100, h=20),
-                    ),
-                ),
-                table_blocks=(original_table,),
-                image_size=ImageSize(width=200, height=200),
-                page_meta={
-                    "mineru_table_candidates": [
-                        {
-                            "source": "mineru_content_list",
-                            "page_index": 0,
-                            "bbox": {"x": 10, "y": 10, "w": 100, "h": 80},
-                            "image_uri": str(tmp_path / "table.jpg"),
-                        }
-                    ]
-                },
-            ),
-        ),
-        middle_json_ref=middle_ref,
-        page_count=1,
-    )
-
-    class _FailingPaddleService:
-        def extract_tables(self, **_: object) -> object:
-            raise PaddleTableStructureError("table cell refinement failed")
-
-    monkeypatch.setattr(
-        "platform_foundation.inference.mineru._build_paddle_table_service",
-        lambda _options: _FailingPaddleService(),
-    )
-
-    refined = _maybe_refine_table_cells_with_paddle(
-        input_path=tmp_path / "sample.pdf",
-        output_dir=tmp_path,
-        parsed=parsed,
-        options={
-            "enable_paddle_table_refine": True,
-            "table_cell_refine_fail_open": True,
-        },
-    )
-
-    assert refined.pages[0].text == "mineru fallback"
-    assert refined.pages[0].table_blocks == (original_table,)
-    warning = refined.pages[0].page_meta["table_cell_refine"]
-    assert warning["success"] is False
-    assert warning["fail_open"] is True
-    assert "table cell refinement failed" in warning["error"]
-
-
-def test_paddle_table_service_defaults_to_resident_api() -> None:
-    service = _build_paddle_table_service({})
-
-    assert isinstance(service, PaddleTableApiClient)
-    assert service.api_url == "http://127.0.0.1:8200"
-
-
-def test_paddle_table_service_can_use_local_process_when_explicit() -> None:
-    service = _build_paddle_table_service({"paddle_table_use_local": True})
-
-    assert isinstance(service, PaddleTableStructureService)
-
-
 def test_layout_extract_mineru_operator_fans_out_document_into_pages() -> None:
     parsed = parse_mineru_middle_json(
         _sample_middle_json(),
@@ -674,7 +585,7 @@ def test_layout_extract_mineru_paddle_table_operator_injects_defaults() -> None:
     assert service.options is not None
     assert service.options["enable_table_cell_refine"] is True
     assert service.options["table_cell_refine_when_tables_present"] is True
-    assert service.options["table_cell_refine_fail_open"] is True
+    assert service.options["table_cell_refine_fail_open"] is False
     assert service.options["paddle_table_mode"] == "ppstructurev3"
     assert service.options["timeout_seconds"] == 1800.0
 
@@ -699,28 +610,6 @@ def test_pure_mineru_options_default_to_ocr_table_engine() -> None:
     assert options["enable_table_cell_refine"] is False
     assert options["enable_paddle_table_refine"] is False
     assert "paddle_table_mode" not in options
-
-
-def test_pure_mineru_options_default_to_fail_open_for_paddle_tables() -> None:
-    options = _build_mineru_options(
-        output_dir=None,
-        api_url="http://127.0.0.1:8000",
-        timeout_seconds=1800.0,
-        parse_method="auto",
-        backend="pipeline",
-        lang="ch",
-        extra_args=None,
-        table_engine="paddle",
-        paddle_table_mode="ppstructurev3",
-        paddle_device=None,
-        mineru_options=None,
-    )
-
-    assert options["table_engine"] == "paddle"
-    assert options["enable_table_cell_refine"] is True
-    assert options["enable_paddle_table_refine"] is True
-    assert options["table_cell_refine_fail_open"] is True
-    assert options["paddle_table_mode"] == "ppstructurev3"
 
 
 class _FailingMinerUService:

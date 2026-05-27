@@ -30,7 +30,6 @@ from .paddle_table import (
 
 JsonDict = dict[str, Any]
 CommandRunner = Callable[[list[str], float | None], None]
-DEFAULT_PADDLE_TABLE_API_URL = "http://127.0.0.1:8200"
 
 
 class MinerUServiceError(RuntimeError):
@@ -581,8 +580,6 @@ def _build_paddle_table_service(options: Mapping[str, Any]) -> PaddleTableStruct
     api_url = _coerce_optional_str(options.get("paddle_table_api_url"))
     if api_url is None:
         api_url = _coerce_optional_str(os.environ.get("PADDLE_TABLE_API_URL"))
-    if api_url is None and not _coerce_bool(options.get("paddle_table_use_local")):
-        api_url = DEFAULT_PADDLE_TABLE_API_URL
     if api_url:
         timeout_seconds = _coerce_float(options.get("paddle_table_api_timeout_seconds"))
         if timeout_seconds is None:

@@ -51,7 +51,7 @@ class LayoutExtractMinerUPaddleTableOperator(LayoutExtractMinerUOperator):
             mineru_options.setdefault("table_engine", "paddle")
             mineru_options.setdefault("enable_table_cell_refine", True)
             mineru_options.setdefault("enable_paddle_table_refine", True)
-            mineru_options.setdefault("table_cell_refine_fail_open", True)
+            mineru_options.setdefault("table_cell_refine_fail_open", False)
             mineru_options.setdefault("paddle_table_mode", "ppstructurev3")
         mineru_options.setdefault("table_cell_refine_when_tables_present", True)
         mineru_options.setdefault("emit_table_cells_as_text_blocks", False)
