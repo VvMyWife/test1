@@ -63,6 +63,14 @@ MinerU API:       http://127.0.0.1:8000
 Paddle Table API: http://127.0.0.1:8200
 ```
 
+如果宿主机端口已被占用：
+
+```bash
+MINERU_API_HOST_PORT=18000 PADDLE_TABLE_API_HOST_PORT=18200 docker compose up -d --build
+curl http://127.0.0.1:18000/health
+curl http://127.0.0.1:18200/health
+```
+
 验证：
 
 ```bash

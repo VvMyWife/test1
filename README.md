@@ -67,6 +67,14 @@ docker run --rm --gpus all nvidia/cuda:11.8.0-runtime-ubuntu22.04 nvidia-smi
 docker compose up -d --build
 ```
 
+如果同一台机器上已经占用了 `8000/8200`，可以换宿主端口：
+
+```bash
+MINERU_API_HOST_PORT=18000 PADDLE_TABLE_API_HOST_PORT=18200 docker compose up -d --build
+curl http://127.0.0.1:18000/health
+curl http://127.0.0.1:18200/health
+```
+
 检查：
 
 ```bash

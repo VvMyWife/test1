@@ -15,8 +15,8 @@ services:
       MINERU_MODEL_SOURCE: "${MINERU_MODEL_SOURCE:-modelscope}"
       CUDA_VISIBLE_DEVICES: "${CUDA_VISIBLE_DEVICES:-0}"
     ports:
-      - "127.0.0.1:8000:8000"
-      - "127.0.0.1:8200:8200"
+      - "${MINERU_API_BIND:-127.0.0.1}:${MINERU_API_HOST_PORT:-8000}:8000"
+      - "${PADDLE_TABLE_API_BIND:-127.0.0.1}:${PADDLE_TABLE_API_HOST_PORT:-8200}:8200"
     volumes:
       - ./data/input:/workspace/input
       - ./output:/workspace/output
