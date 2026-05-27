@@ -80,6 +80,12 @@ curl http://127.0.0.1:18000/health
 curl http://127.0.0.1:18200/health
 ```
 
+如果 compose 构建时要复用本机已有基础镜像：
+
+```bash
+BASE_IMAGE=mineru:latest docker compose up -d --build
+```
+
 验证：
 
 ```bash
