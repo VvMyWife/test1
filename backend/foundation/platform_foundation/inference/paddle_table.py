@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+import base64
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ from statistics import mean, median
 import threading
 from typing import Any
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ..contracts import ArtifactRef, BoundingBox, ImageSize, TableBlock, TableCell, TextBlock
@@ -204,8 +206,10 @@ class PaddleTableApiClient:
         timeout_seconds = _coerce_float(opts.get("paddle_table_api_timeout_seconds"))
         if timeout_seconds is None:
             timeout_seconds = self.timeout_seconds
+        send_file_bytes = _should_send_file_bytes(self.api_url, opts)
         payload = {
             "file_uri": file_uri,
+            "file_name": _path_name_from_uri(file_uri),
             "output_dir": str(output_dir),
             "target_page_sizes": {
                 str(page): size.model_dump(mode="json") if size is not None else None
@@ -213,7 +217,10 @@ class PaddleTableApiClient:
             },
             "options": _jsonable(opts),
             "table_candidates_by_page": {
-                str(page): [_jsonable(candidate) for candidate in candidates]
+                str(page): [
+                    _jsonable_candidate_for_api(candidate, send_file_bytes=send_file_bytes)
+                    for candidate in candidates
+                ]
                 for page, candidates in dict(table_candidates_by_page or {}).items()
             },
             "page_text_blocks_by_page": {
@@ -224,6 +231,8 @@ class PaddleTableApiClient:
                 for page, blocks in dict(page_text_blocks_by_page or {}).items()
             },
         }
+        if send_file_bytes:
+            payload["file_bytes_b64"] = _read_local_file_b64(file_uri)
         endpoint = f"{self.api_url.rstrip('/')}/api/v1/paddle/table-extract"
         request = urllib.request.Request(
             endpoint,
@@ -246,7 +255,10 @@ class PaddleTableApiClient:
             raise PaddleTableStructureError(
                 str(response_payload.get("error") or "Paddle table API returned success=false")
             )
-        result = paddle_table_result_from_payload(response_payload["data"])
+        response_data = response_payload["data"]
+        result = paddle_table_result_from_payload(response_data)
+        if send_file_bytes:
+            result = _materialize_api_artifact(response_data, output_dir=output_dir, result=result)
         meta = dict(result.meta)
         meta["transport"] = "http"
         meta["api_url"] = self.api_url
@@ -258,6 +270,16 @@ class PaddleTableApiClient:
 
 
 def paddle_table_result_to_payload(result: PaddleTableStructureResult) -> JsonDict:
+    artifact_payload: Any = None
+    if result.artifact_ref is not None:
+        artifact_uri = _coerce_optional_str(result.artifact_ref.uri)
+        if artifact_uri:
+            artifact_path = Path(artifact_uri)
+            if artifact_path.is_file():
+                try:
+                    artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+                except Exception:
+                    artifact_payload = None
     return {
         "tables_by_page": {
             str(page): [table.model_dump(mode="json") for table in tables]
@@ -266,6 +288,7 @@ def paddle_table_result_to_payload(result: PaddleTableStructureResult) -> JsonDi
         "artifact_ref": (
             result.artifact_ref.model_dump(mode="json") if result.artifact_ref is not None else None
         ),
+        "artifact_payload": _jsonable(artifact_payload),
         "meta": _jsonable(result.meta),
     }
 
@@ -291,6 +314,43 @@ def paddle_table_result_from_payload(payload: Mapping[str, Any]) -> PaddleTableS
         tables_by_page=tables_by_page,
         artifact_ref=artifact_ref,
         meta=meta,
+    )
+
+
+def _materialize_api_artifact(
+    payload: Mapping[str, Any],
+    *,
+    output_dir: Path,
+    result: PaddleTableStructureResult,
+) -> PaddleTableStructureResult:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = output_dir / "paddle_table_structure.json"
+    artifact_payload = payload.get("artifact_payload")
+    if not isinstance(artifact_payload, Mapping):
+        artifact_payload = {
+            "provider": result.meta.get("provider"),
+            "mode": result.meta.get("mode"),
+            "table_count": result.meta.get("table_count"),
+            "cell_count": result.meta.get("cell_count"),
+            "tables_by_page": {
+                str(page): [table.model_dump(mode="json") for table in tables]
+                for page, tables in result.tables_by_page.items()
+            },
+        }
+    artifact_path.write_text(json.dumps(artifact_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    artifact_meta: JsonDict = {
+        "content_type": "application/json",
+        "provider": result.meta.get("provider"),
+        "mode": result.meta.get("mode"),
+    }
+    if result.artifact_ref is not None:
+        artifact_meta.update(result.artifact_ref.meta)
+    artifact_ref = ArtifactRef(kind="paddle_table_json", uri=str(artifact_path), meta=artifact_meta)
+    return PaddleTableStructureResult(
+        tables_by_page=result.tables_by_page,
+        artifact_ref=artifact_ref,
+        meta=dict(result.meta),
     )
 
 
@@ -1124,6 +1184,60 @@ def _jsonable(value: Any) -> Any:
     if hasattr(value, "tolist"):
         return _jsonable(value.tolist())
     return value
+
+
+def _jsonable_candidate_for_api(candidate: Mapping[str, Any], *, send_file_bytes: bool) -> JsonDict:
+    payload = _jsonable(candidate)
+    if not isinstance(payload, dict) or not send_file_bytes:
+        return payload if isinstance(payload, dict) else {}
+
+    image_uri = _coerce_optional_str(payload.get("image_uri"))
+    if image_uri is None:
+        return payload
+    image_path = _local_path_from_uri(image_uri)
+    if image_path is None or not image_path.is_file():
+        return payload
+    payload["image_name"] = image_path.name
+    payload["image_bytes_b64"] = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return payload
+
+
+def _should_send_file_bytes(api_url: str, options: Mapping[str, Any]) -> bool:
+    configured = options.get("paddle_table_api_send_file_bytes")
+    if configured is None:
+        configured = os.environ.get("PADDLE_TABLE_API_SEND_FILE_BYTES", "auto")
+    if isinstance(configured, str) and configured.strip().lower() == "auto":
+        host = (urllib.parse.urlparse(api_url).hostname or "").strip().lower()
+        return host not in {"", "localhost", "127.0.0.1", "::1", "0.0.0.0"}
+    return _coerce_bool(configured, default=False)
+
+
+def _read_local_file_b64(file_uri: str) -> str:
+    path = _local_path_from_uri(file_uri)
+    if path is None or not path.is_file():
+        raise PaddleTableStructureError(f"Cannot send Paddle table API file bytes; local file does not exist: {file_uri}")
+    return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _path_name_from_uri(file_uri: str) -> str | None:
+    path = _local_path_from_uri(file_uri)
+    if path is not None:
+        return path.name
+    parsed = urllib.parse.urlparse(file_uri)
+    if parsed.path:
+        return Path(urllib.request.url2pathname(parsed.path)).name
+    return None
+
+
+def _local_path_from_uri(file_uri: str) -> Path | None:
+    parsed = urllib.parse.urlparse(file_uri)
+    if parsed.scheme and parsed.scheme != "file":
+        return None
+    raw_path = urllib.request.url2pathname(parsed.path) if parsed.scheme == "file" else file_uri
+    try:
+        return Path(raw_path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
 
 
 def _unwrap_result_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
