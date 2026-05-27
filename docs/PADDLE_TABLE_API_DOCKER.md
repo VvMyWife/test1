@@ -7,6 +7,7 @@
 ```text
 MinerU API Docker:       http://127.0.0.1:8000
 Paddle Table API Docker: http://127.0.0.1:8200
+Remote bind:             0.0.0.0:8200
 
 Python 主流程:
   extract_pdf_file(..., table_engine="paddle")
