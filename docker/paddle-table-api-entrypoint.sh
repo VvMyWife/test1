@@ -14,6 +14,7 @@ PY
 export LD_LIBRARY_PATH="${site_packages}/nvidia/cudnn/lib:${site_packages}/nvidia/cublas/lib:${site_packages}/nvidia/cuda_runtime/lib:${site_packages}/nvidia/cuda_nvrtc/lib:${site_packages}/nvidia/cusolver/lib:${site_packages}/nvidia/cusparse/lib:${site_packages}/nvidia/nccl/lib:${site_packages}/nvidia/cufft/lib:${site_packages}/nvidia/curand/lib:${site_packages}/nvidia/cuda_cupti/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 export PADDLE_TABLE_API_PRELOAD="${PADDLE_TABLE_API_PRELOAD:-true}"
 export PADDLE_TABLE_API_PRELOAD_MODES="${PADDLE_TABLE_API_PRELOAD_MODES:-table_structure,ppstructurev3}"
+export PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS="${PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS:-}"
 export HOME="${HOME:-/workspace}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
 export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"

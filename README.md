@@ -263,3 +263,25 @@ docker compose exec mineru-operator tail -n 100 /workspace/logs/paddle-table-api
 ```bash
 rm -rf output/*
 ```
+## Docker 性能边界测试
+
+如果要自动测试当前服务器上 OCR/Paddle 两种模式的最佳并发参数，可以运行：
+
+```bash
+cd /root/mineru_workspace
+
+python scripts/docker_benchmark_matrix.py \
+  --engines ocr,paddle \
+  --mineru-api-concurrency-values 1,2,4,8,12,16,24,32,64,128 \
+  --paddle-api-concurrency-values 1,2,4,8,12,16,24,32 \
+  --concurrency-values 1,2,4,8,12,16,24,32
+```
+
+脚本会反复重启 Docker 服务以分别修改 MinerU API 和 Paddle Table API 的服务端最大并发；服务启动时间不会计入测试结果。输出位于：
+
+```text
+output/docker_benchmark/benchmark_state.json
+output/docker_benchmark/docker_benchmark.xlsx
+```
+
+中途断开后，重新执行同一条命令即可断点继续。详细说明见 `docs/DOCKER_BENCHMARK.md`。
