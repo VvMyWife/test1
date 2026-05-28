@@ -28,7 +28,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_TABLE_API_URL=http://127.0.0.1:8200 \
     PADDLE_TABLE_API_PRELOAD=true \
     PADDLE_TABLE_API_PRELOAD_MODES=table_structure,ppstructurev3 \
-    PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS=1800 \
     ENABLE_PADDLE_API=true \
     XDG_CACHE_HOME=/workspace/.cache \
     HF_HOME=/workspace/.cache/huggingface \
