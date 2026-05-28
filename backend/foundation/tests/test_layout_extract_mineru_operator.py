@@ -193,7 +193,11 @@ def test_parse_mineru_middle_json_preserves_mineru_table_output() -> None:
     assert table.html is not None
     assert table.cells == []
     assert table.meta["source"] == "mineru_middle_json_table"
-    assert table.meta["raw_table"]["type"] == "table"
+    assert table.meta["raw_source"] == "table"
+    assert table.meta["raw_block_count"] == 1
+    assert table.meta["has_html"] is True
+    assert "raw_table" not in table.meta
+    assert json.dumps(table.model_dump(mode="json"), ensure_ascii=False).count("<table>") == 1
     assert parsed.parsed_pdf is not None
     assert parsed.parsed_pdf.pages[0].table_blocks[0].provider == "mineru"
 

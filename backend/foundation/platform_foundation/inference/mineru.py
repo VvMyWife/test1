@@ -441,7 +441,10 @@ def _extract_mineru_table_blocks(
         meta: JsonDict = {
             "source": "mineru_middle_json_table",
             "raw_source": _coerce_optional_str(raw_table.get("type"), "table"),
-            "raw_table": dict(raw_table),
+            "raw_block_index": _coerce_int(raw_table.get("index")),
+            "raw_block_score": _coerce_confidence(raw_table.get("score")),
+            "raw_block_count": _len_if_list(raw_table.get("blocks")),
+            "has_html": html is not None,
         }
         if matched_candidate is not None:
             meta["candidate"] = dict(matched_candidate)
@@ -1000,6 +1003,17 @@ def _coerce_confidence(value: Any) -> float | None:
     if score is None or score < 0.0 or score > 1.0:
         return None
     return score
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _len_if_list(value: Any) -> int | None:
+    return len(value) if isinstance(value, list) else None
 
 
 def _coerce_page_index(value: Any, fallback_index: int) -> int:
