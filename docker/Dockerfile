@@ -68,7 +68,7 @@ RUN /opt/venvs/mineru/bin/python -m pip install \
         torchaudio==2.6.0+cu118 \
     && /opt/venvs/mineru/bin/python -m pip install \
         -i "${PIP_INDEX_URL}" \
-        mineru==3.1.6 \
+        "mineru[pipeline]==3.1.6" \
         daft==0.7.11 \
         fastapi==0.136.1 \
         uvicorn==0.46.0
