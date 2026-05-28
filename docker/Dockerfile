@@ -28,6 +28,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_TABLE_API_URL=http://127.0.0.1:8200 \
     PADDLE_TABLE_API_PRELOAD=true \
     PADDLE_TABLE_API_PRELOAD_MODES=table_structure,ppstructurev3 \
+    PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS=1800 \
     ENABLE_PADDLE_API=true \
     XDG_CACHE_HOME=/workspace/.cache \
     HF_HOME=/workspace/.cache/huggingface \
@@ -102,5 +103,5 @@ EXPOSE 8000 8200
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/mineru_workspace/docker/entrypoint.sh"]
 CMD ["server"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=1800s --retries=3 \
     CMD /opt/mineru_workspace/docker/entrypoint.sh healthcheck

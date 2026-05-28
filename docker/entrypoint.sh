@@ -87,7 +87,7 @@ start_paddle_api() {
     > "${WORKSPACE_ROOT}/logs/paddle-table-api-${PADDLE_TABLE_API_PORT}.log" 2>&1 &
   paddle_pid="$!"
   echo "${paddle_pid}" > "${WORKSPACE_ROOT}/run/paddle-table-api-${PADDLE_TABLE_API_PORT}.pid"
-  wait_http "paddle-table-api" "${PADDLE_TABLE_API_URL}/health" "${PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS:-600}"
+  wait_http "paddle-table-api" "${PADDLE_TABLE_API_URL}/health" "${PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS:-1800}"
 }
 
 stop_children() {
