@@ -26,5 +26,6 @@ services:
       - ./data/input:/workspace/input
       - ./output:/workspace/output
       - ./.cache/mineru-operator:/workspace/.cache
+      - ./.cache/paddlex:/root/.paddlex
       - ./logs:/workspace/logs
       - ./run:/workspace/run

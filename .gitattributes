@@ -1,5 +1,7 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
 docker/Dockerfile text eol=lf
 docker/*.Dockerfile text eol=lf

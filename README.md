@@ -18,7 +18,7 @@
 宿主机只需要准备这几个相对目录：
 
 ```bash
-mkdir -p data/input output logs run .cache/mineru-operator
+mkdir -p data/input output logs run .cache/mineru-operator .cache/paddlex
 ```
 
 把 PDF 放入：
@@ -33,6 +33,7 @@ cp your.pdf data/input/
 /workspace/input   -> 输入 PDF
 /workspace/output  -> 输出 JSON、batch_report.json、batch_report.csv
 /workspace/.cache  -> MinerU/Paddle 模型缓存
+/root/.paddlex     -> PaddleX/PaddleOCR 模型缓存
 /workspace/logs    -> 服务日志
 ```
 
@@ -183,6 +184,7 @@ docker run --rm \
   -v ./data/input:/workspace/input \
   -v ./output:/workspace/output \
   -v ./.cache/mineru-operator:/workspace/.cache \
+  -v ./.cache/paddlex:/root/.paddlex \
   -v ./logs:/workspace/logs \
   mineru-operator:latest \
   batch
@@ -199,6 +201,7 @@ docker run --rm \
   -v ./data/input:/workspace/input \
   -v ./output:/workspace/output \
   -v ./.cache/mineru-operator:/workspace/.cache \
+  -v ./.cache/paddlex:/root/.paddlex \
   -v ./logs:/workspace/logs \
   mineru-operator:latest \
   batch
@@ -215,7 +218,7 @@ docker save mineru-operator:latest | gzip > mineru-operator-image.tar.gz
 如果想连模型缓存一起迁移：
 
 ```bash
-tar -czf mineru-operator-cache.tar.gz .cache/mineru-operator
+tar -czf mineru-operator-cache.tar.gz .cache/mineru-operator .cache/paddlex
 ```
 
 目标服务器导入：
