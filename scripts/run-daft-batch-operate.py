@@ -12,15 +12,15 @@ WORKSPACE = Path(os.environ.get("WORKSPACE", str(Path.cwd()))).expanduser().reso
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract one-to-one MinerU JSON files from a PDF or a directory."
+        description="Extract one-to-one MinerU JSON files from a PDF/image or a directory."
     )
     parser.add_argument(
         "input",
         nargs="?",
         default=None,
-        help="PDF file or directory. Defaults to input/ under the workspace when present.",
+        help="PDF/image file or directory. Defaults to input/ under the workspace when present.",
     )
-    parser.add_argument("--input-dir", default=None, help="Directory containing PDF files.")
+    parser.add_argument("--input-dir", default=None, help="Directory containing PDF/image files.")
     parser.add_argument("--output-dir", default=None, help="Directory for generated JSON files.")
     parser.add_argument(
         "--table-engine",
@@ -37,14 +37,26 @@ def main() -> None:
         "--concurrency",
         type=int,
         default=int(os.environ.get("MINERU_CONCURRENCY", "1")),
-        help="Maximum PDFs processed at the same time in directory mode.",
+        help="Maximum input files processed at the same time in directory mode.",
     )
-    parser.add_argument("--recursive", action="store_true", help="Recursively scan for PDFs.")
-    parser.add_argument("--limit", type=int, default=0, help="Optional max PDF count in directory mode.")
+    parser.add_argument("--recursive", action="store_true", help="Recursively scan for input files.")
+    parser.add_argument("--limit", type=int, default=0, help="Optional max input file count in directory mode.")
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Reprocess files even when the target JSON already exists.",
+    )
+    parser.add_argument(
+        "--enable-page-screenshots",
+        action="store_true",
+        default=_env_bool("ENABLE_PAGE_SCREENSHOTS", default=False),
+        help="Export full-page PNG screenshots under each artifact directory.",
+    )
+    parser.add_argument(
+        "--page-screenshot-dpi",
+        type=int,
+        default=int(os.environ.get("PAGE_SCREENSHOT_DPI", "144")),
+        help="DPI for --enable-page-screenshots.",
     )
     args = parser.parse_args()
 
@@ -58,6 +70,8 @@ def main() -> None:
             output_dir=output_dir,
             table_engine=table_engine,
             overwrite=True,
+            enable_page_screenshots=args.enable_page_screenshots,
+            page_screenshot_dpi=args.page_screenshot_dpi,
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2), flush=True)
         if result.success:
@@ -76,6 +90,8 @@ def main() -> None:
         limit=args.limit if args.limit > 0 else None,
         overwrite=args.overwrite,
         resume=not args.overwrite,
+        enable_page_screenshots=args.enable_page_screenshots,
+        page_screenshot_dpi=args.page_screenshot_dpi,
     )
     print(f"MINERU_BATCH_REPORT={report.batch_report_path}", flush=True)
     print(f"MINERU_BATCH_CSV={report.batch_report_csv_path}", flush=True)
@@ -98,6 +114,13 @@ def main() -> None:
     )
     if report.failure_count:
         raise SystemExit(1)
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _resolve_input_path(raw_input: str | None, raw_input_dir: str | None) -> Path:

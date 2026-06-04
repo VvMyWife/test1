@@ -158,7 +158,7 @@ def parse_args() -> argparse.Namespace:
             "test in paddle mode. Ignored for ocr mode."
         ),
     )
-    parser.add_argument("--input-dir", default="/workspace/input", help="Container path for input PDFs.")
+    parser.add_argument("--input-dir", default="/workspace/input", help="Container path for input PDF/image files.")
     parser.add_argument(
         "--host-output-root",
         default="output/docker_benchmark",

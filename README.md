@@ -284,3 +284,52 @@ output/docker_benchmark/docker_benchmark.xlsx
 ```
 
 中途断开后，重新执行同一条命令即可断点继续。详细说明见 `docs/DOCKER_BENCHMARK.md`。
+
+## 图片输入和整页截图
+
+批处理目录现在支持这些输入：
+
+```text
+.pdf, .jpg, .jpeg, .png, .bmp, .tif, .tiff
+```
+
+图片会在算子内部自动转换成单页 PDF，再复用原来的 MinerU/Paddle 流程。转换产物会保留在对应 artifact 目录下，例如：
+
+```text
+output/15/
+└── 15.converted.pdf
+```
+
+整页截图导出默认关闭。需要时显式开启：
+
+```bash
+ENABLE_PAGE_SCREENSHOTS=true PAGE_SCREENSHOT_DPI=144 \
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input \
+  --output-dir /workspace/output/ocr_with_screenshots \
+  --table-engine ocr \
+  --concurrency 4 \
+  --overwrite
+```
+
+也可以直接用 CLI 参数：
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input/5.pdf \
+  --output-dir /workspace/output/single_with_screenshots \
+  --table-engine ocr \
+  --enable-page-screenshots \
+  --page-screenshot-dpi 144 \
+  --overwrite
+```
+
+输出结构：
+
+```text
+output/5/
+└── page_screenshots/
+    ├── page_0001.png
+    ├── page_0002.png
+    └── page_manifest.jsonl
+```

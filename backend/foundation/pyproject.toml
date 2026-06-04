@@ -9,6 +9,7 @@ description = "Internal foundation operators for OCR and document parsing."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "Pillow>=10.0.0",
   "pydantic>=2.0.0",
 ]
 

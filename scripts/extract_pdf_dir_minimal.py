@@ -11,6 +11,14 @@ WORKSPACE = Path(
 ).expanduser().resolve()
 TABLE_ENGINE = os.environ.get("TABLE_ENGINE", "ocr").strip().lower()
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "12"))
+ENABLE_PAGE_SCREENSHOTS = os.environ.get("ENABLE_PAGE_SCREENSHOTS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "y",
+    "on",
+}
+PAGE_SCREENSHOT_DPI = int(os.environ.get("PAGE_SCREENSHOT_DPI", "144"))
 DEFAULT_INPUT_DIR = WORKSPACE / "input"
 if not DEFAULT_INPUT_DIR.exists():
     DEFAULT_INPUT_DIR = WORKSPACE / "data" / "input"
@@ -35,6 +43,8 @@ report = extract_pdf_dir(
     limit=None,
     overwrite=True,
     resume=False,
+    enable_page_screenshots=ENABLE_PAGE_SCREENSHOTS,
+    page_screenshot_dpi=PAGE_SCREENSHOT_DPI,
     paddle_operator_max_inflight=None,
     ocr_operator_max_inflight=None,
 )
@@ -52,3 +62,4 @@ print("engine:", report.engine)
 print("table_engine:", report.table_engine)
 print("concurrency:", report.concurrency)
 print("mineru_extra_args:", report.mineru_extra_args)
+print("enable_page_screenshots:", report.enable_page_screenshots)

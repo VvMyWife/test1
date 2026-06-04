@@ -9,11 +9,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import time
 from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..contracts import ArtifactRef
 from ..operators import LayoutExtractMinerUOperator, LayoutExtractMinerUPaddleTableOperator
 from .pure_mineru import (
     DEFAULT_MINERU_API_URL,
@@ -25,6 +28,10 @@ from .pure_mineru import (
 JsonDict = dict[str, Any]
 DEFAULT_OCR_OPERATOR_MAX_INFLIGHT: int | None = None
 DEFAULT_PADDLE_OPERATOR_MAX_INFLIGHT: int | None = None
+SUPPORTED_PDF_SUFFIXES = {".pdf"}
+SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+SUPPORTED_INPUT_SUFFIXES = SUPPORTED_PDF_SUFFIXES | SUPPORTED_IMAGE_SUFFIXES
+DEFAULT_PAGE_SCREENSHOT_DPI = 144
 
 
 class PdfFileExtractResult(BaseModel):
@@ -58,6 +65,9 @@ class PdfFileExtractResult(BaseModel):
     mineru_lang: str = "ch"
     mineru_extra_args: list[str] = Field(default_factory=list)
     api_url: str = DEFAULT_MINERU_API_URL
+    input_type: str = "pdf"
+    converted_pdf_path: str | None = None
+    page_screenshots_manifest: str | None = None
 
 
 class PdfDirExtractReport(BaseModel):
@@ -90,6 +100,7 @@ class PdfDirExtractReport(BaseModel):
     failed_files_jsonl: str
     total_elapsed_seconds: float = Field(ge=0)
     items: list[PdfFileExtractResult] = Field(default_factory=list)
+    enable_page_screenshots: bool = False
 
 
 class MinerUPdfFileOperator:
@@ -137,15 +148,17 @@ class MinerUPdfFileOperator:
         paddle_device: str | None = None,
         source_file_name: str | None = None,
         overwrite: bool = True,
+        enable_page_screenshots: bool = False,
+        page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI,
         queue_wait_seconds: float = 0.0,
         extra_args: Sequence[str] | None = None,
         mineru_options: dict[str, Any] | None = None,
     ) -> PdfFileExtractResult:
         output_root = Path(output_dir).expanduser().resolve()
         output_root.mkdir(parents=True, exist_ok=True)
-        resolved_pdf = Path(pdf_path).expanduser().resolve()
-        resolved_source_name = source_file_name or resolved_pdf.name
-        output_stem = _safe_stem(resolved_source_name or resolved_pdf.name)
+        resolved_input = Path(pdf_path).expanduser().resolve()
+        resolved_source_name = source_file_name or resolved_input.name
+        output_stem = _safe_stem(resolved_source_name or resolved_input.name)
         artifact_dir = output_root / output_stem
         json_path = output_root / f"{output_stem}.json"
         error_path = output_root / f"{output_stem}.error.json"
@@ -164,8 +177,18 @@ class MinerUPdfFileOperator:
             _unlink_if_exists(error_path)
 
         started = time.perf_counter()
+        input_type = "pdf"
+        converted_pdf_path: Path | None = None
+        page_screenshots_manifest: str | None = None
         try:
-            self._validate_pdf_path(resolved_pdf)
+            self._validate_input_path(resolved_input)
+            pdf_for_mineru = resolved_input
+            if _is_image_file(resolved_input):
+                input_type = "image"
+                converted_pdf_path = artifact_dir / f"{output_stem}.converted.pdf"
+                _convert_image_to_pdf(resolved_input, converted_pdf_path)
+                pdf_for_mineru = converted_pdf_path
+
             options = dict(mineru_options or {})
             options.update(
                 {
@@ -182,7 +205,7 @@ class MinerUPdfFileOperator:
                 options["paddle_device"] = paddle_device
 
             parsed = extract_pdf(
-                resolved_pdf,
+                pdf_for_mineru,
                 output_dir=artifact_dir,
                 api_url=self.api_url,
                 timeout_seconds=self.timeout_seconds,
@@ -196,11 +219,40 @@ class MinerUPdfFileOperator:
                 mineru_options=options,
                 operator_factory=self._operator_factory_for(resolved_table_engine),
             )
-            parsed = parsed.model_copy(update={"source_file_name": resolved_source_name})
+            artifacts = list(parsed.artifacts)
+            if converted_pdf_path is not None:
+                artifacts.append(
+                    ArtifactRef(
+                        kind="converted_pdf",
+                        uri=str(converted_pdf_path),
+                        meta={
+                            "source_path": str(resolved_input),
+                            "source_file_name": resolved_source_name,
+                            "source_type": input_type,
+                        },
+                    )
+                )
+            if enable_page_screenshots:
+                screenshot_artifact = _render_pdf_page_screenshots(
+                    pdf_for_mineru,
+                    output_dir=artifact_dir / "page_screenshots",
+                    page_count=parsed.page_count,
+                    dpi=page_screenshot_dpi,
+                )
+                artifacts.append(screenshot_artifact)
+                page_screenshots_manifest = screenshot_artifact.uri
+
+            parsed = parsed.model_copy(
+                update={
+                    "source_pdf": str(resolved_input),
+                    "source_file_name": resolved_source_name,
+                    "artifacts": artifacts,
+                }
+            )
             json_path.write_text(dump_pure_mineru_json(parsed, indent=2), encoding="utf-8")
             processing_seconds = time.perf_counter() - started
             return PdfFileExtractResult(
-                pdf_path=str(resolved_pdf),
+                pdf_path=str(resolved_input),
                 source_file_name=resolved_source_name,
                 success=True,
                 json_path=str(json_path),
@@ -225,11 +277,14 @@ class MinerUPdfFileOperator:
                 mineru_lang=self.lang,
                 mineru_extra_args=resolved_extra_args,
                 api_url=self.api_url,
+                input_type=input_type,
+                converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
+                page_screenshots_manifest=page_screenshots_manifest,
             )
         except Exception as exc:
             processing_seconds = time.perf_counter() - started
             result = PdfFileExtractResult(
-                pdf_path=str(resolved_pdf),
+                pdf_path=str(resolved_input),
                 source_file_name=resolved_source_name,
                 success=False,
                 json_path=None,
@@ -249,6 +304,9 @@ class MinerUPdfFileOperator:
                 mineru_lang=self.lang,
                 mineru_extra_args=resolved_extra_args,
                 api_url=self.api_url,
+                input_type=input_type,
+                converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
+                page_screenshots_manifest=page_screenshots_manifest,
             )
             error_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
             return result
@@ -281,13 +339,14 @@ class MinerUPdfFileOperator:
         )
 
     @staticmethod
-    def _validate_pdf_path(pdf_path: Path) -> None:
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
-        if not pdf_path.is_file():
-            raise ValueError(f"PDF path is not a file: {pdf_path}")
-        if pdf_path.suffix.lower() != ".pdf":
-            raise ValueError(f"PDF path must end with .pdf: {pdf_path}")
+    def _validate_input_path(input_path: Path) -> None:
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+        if not input_path.is_file():
+            raise ValueError(f"Input path is not a file: {input_path}")
+        if input_path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+            supported = ", ".join(sorted(SUPPORTED_INPUT_SUFFIXES))
+            raise ValueError(f"Input file must be one of {supported}: {input_path}")
 
 
 class MinerUPdfDirBatchOperator:
@@ -333,6 +392,8 @@ class MinerUPdfDirBatchOperator:
         limit: int | None = None,
         resume: bool = True,
         overwrite: bool = False,
+        enable_page_screenshots: bool = False,
+        page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI,
         paddle_table_mode: str = "ppstructurev3",
         paddle_device: str | None = None,
         engine: str = "auto",
@@ -344,11 +405,12 @@ class MinerUPdfDirBatchOperator:
         input_root = Path(input_dir).expanduser().resolve()
         output_root = Path(output_dir).expanduser().resolve()
         output_root.mkdir(parents=True, exist_ok=True)
-        pdfs = _list_pdfs(input_root, recursive=recursive)
+        pdfs = _list_input_files(input_root, recursive=recursive)
         if limit is not None and limit > 0:
             pdfs = pdfs[:limit]
         if not pdfs:
-            raise ValueError(f"No PDF files found in {input_root}")
+            supported = ", ".join(sorted(SUPPORTED_INPUT_SUFFIXES))
+            raise ValueError(f"No supported input files found in {input_root}; supported: {supported}")
 
         started = time.perf_counter()
         resolved_table_engine = _resolve_table_engine(
@@ -366,6 +428,8 @@ class MinerUPdfDirBatchOperator:
                 paddle_device=paddle_device,
                 resume=resume,
                 overwrite=overwrite,
+                enable_page_screenshots=enable_page_screenshots,
+                page_screenshot_dpi=page_screenshot_dpi,
             )
             for pdf in pdfs
         ]
@@ -385,6 +449,7 @@ class MinerUPdfDirBatchOperator:
             table_engine=resolved_table_engine,
             paddle_table_mode=paddle_table_mode,
             paddle_device=paddle_device,
+            enable_page_screenshots=enable_page_screenshots,
             started_at=started,
             items=items,
         )
@@ -423,6 +488,8 @@ class MinerUPdfDirBatchOperator:
                 paddle_device=task.paddle_device,
                 source_file_name=task.source_file_name,
                 overwrite=True,
+                enable_page_screenshots=task.enable_page_screenshots,
+                page_screenshot_dpi=task.page_screenshot_dpi,
                 queue_wait_seconds=queue_wait_seconds,
             )
 
@@ -460,6 +527,8 @@ class MinerUPdfDirBatchOperator:
                 "table_engine": [task.table_engine for task in tasks],
                 "paddle_table_mode": [task.paddle_table_mode for task in tasks],
                 "paddle_device": [task.paddle_device or "" for task in tasks],
+                "enable_page_screenshots": [task.enable_page_screenshots for task in tasks],
+                "page_screenshot_dpi": [task.page_screenshot_dpi for task in tasks],
                 "resume": [task.resume for task in tasks],
                 "overwrite": [task.overwrite for task in tasks],
                 "api_url": [self.file_operator.api_url for _ in tasks],
@@ -491,6 +560,8 @@ class MinerUPdfDirBatchOperator:
                 daft.col("table_engine"),
                 daft.col("paddle_table_mode"),
                 daft.col("paddle_device"),
+                daft.col("enable_page_screenshots"),
+                daft.col("page_screenshot_dpi"),
                 daft.col("resume"),
                 daft.col("overwrite"),
                 daft.col("api_url"),
@@ -520,6 +591,7 @@ class MinerUPdfDirBatchOperator:
         table_engine: str,
         paddle_table_mode: str,
         paddle_device: str | None,
+        enable_page_screenshots: bool,
         started_at: float,
         items: list[PdfFileExtractResult],
     ) -> PdfDirExtractReport:
@@ -566,6 +638,7 @@ class MinerUPdfDirBatchOperator:
             failed_files_jsonl=str(failed_files_jsonl_path),
             total_elapsed_seconds=total_elapsed_seconds,
             items=items,
+            enable_page_screenshots=enable_page_screenshots,
         )
         batch_report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         return report
@@ -580,6 +653,8 @@ class _BatchTask(BaseModel):
     table_engine: str
     paddle_table_mode: str
     paddle_device: str | None
+    enable_page_screenshots: bool = False
+    page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI
     resume: bool
     overwrite: bool
 
@@ -651,6 +726,8 @@ def _extract_file_for_daft(
     table_engine: str,
     paddle_table_mode: str,
     paddle_device: str,
+    enable_page_screenshots: bool,
+    page_screenshot_dpi: int,
     resume: bool,
     overwrite: bool,
     api_url: str,
@@ -686,6 +763,8 @@ def _extract_file_for_daft(
         table_engine=table_engine,
         paddle_table_mode=paddle_table_mode,
         paddle_device=paddle_device or None,
+        enable_page_screenshots=bool(enable_page_screenshots),
+        page_screenshot_dpi=int(page_screenshot_dpi),
         resume=resume,
         overwrite=overwrite,
     )
@@ -702,6 +781,8 @@ def _build_daft_udf(daft: Any, max_concurrency: int) -> Any:
         table_engine: str,
         paddle_table_mode: str,
         paddle_device: str,
+        enable_page_screenshots: bool,
+        page_screenshot_dpi: int,
         resume: bool,
         overwrite: bool,
         api_url: str,
@@ -725,6 +806,8 @@ def _build_daft_udf(daft: Any, max_concurrency: int) -> Any:
             table_engine,
             paddle_table_mode,
             paddle_device,
+            enable_page_screenshots,
+            page_screenshot_dpi,
             resume,
             overwrite,
             api_url,
@@ -794,6 +877,9 @@ def _result_from_existing_json(
         for table in (page.get("table_blocks") or [])
         if isinstance(table, dict)
     ]
+    artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+    converted_pdf_path = _artifact_uri(artifacts, "converted_pdf")
+    page_screenshots_manifest = _artifact_uri(artifacts, "page_screenshots_manifest")
     return PdfFileExtractResult(
         pdf_path=str(pdf_path),
         source_file_name=source_file_name,
@@ -816,31 +902,144 @@ def _result_from_existing_json(
         mineru_lang=file_operator.lang,
         mineru_extra_args=file_operator._default_extra_args(table_engine),
         api_url=file_operator.api_url,
+        input_type="image" if _is_image_file(pdf_path) else "pdf",
+        converted_pdf_path=converted_pdf_path,
+        page_screenshots_manifest=page_screenshots_manifest,
     )
 
 
-def _list_pdfs(input_root: Path, *, recursive: bool) -> list[Path]:
+def _list_input_files(input_root: Path, *, recursive: bool) -> list[Path]:
     if input_root.is_file():
-        if input_root.suffix.lower() != ".pdf":
-            raise ValueError(f"Input file must be a PDF: {input_root}")
+        if input_root.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+            supported = ", ".join(sorted(SUPPORTED_INPUT_SUFFIXES))
+            raise ValueError(f"Input file must be one of {supported}: {input_root}")
         return [input_root]
     if not input_root.exists():
         raise FileNotFoundError(f"Input directory not found: {input_root}")
     if not input_root.is_dir():
         raise ValueError(f"Input path is not a directory: {input_root}")
-    pattern = "**/*.pdf" if recursive else "*.pdf"
     seen: set[str] = set()
-    pdfs: list[Path] = []
+    inputs: list[Path] = []
+    pattern = "**/*" if recursive else "*"
     for path in sorted(input_root.glob(pattern)):
         if not path.is_file():
+            continue
+        if path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
             continue
         resolved = path.resolve()
         key = str(resolved).lower()
         if key in seen:
             continue
         seen.add(key)
-        pdfs.append(resolved)
-    return pdfs
+        inputs.append(resolved)
+    return inputs
+
+
+def _is_image_file(path: Path) -> bool:
+    return path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+
+
+def _convert_image_to_pdf(image_path: Path, output_pdf_path: Path) -> None:
+    try:
+        from PIL import Image, ImageOps
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("Pillow is required to convert image inputs to PDF") from exc
+
+    output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(image_path) as image:
+        converted = ImageOps.exif_transpose(image)
+        if converted.mode in {"RGBA", "LA"} or (
+            converted.mode == "P" and "transparency" in converted.info
+        ):
+            converted = converted.convert("RGBA")
+            background = Image.new("RGB", converted.size, (255, 255, 255))
+            background.paste(converted, mask=converted.getchannel("A"))
+            converted = background
+        elif converted.mode != "RGB":
+            converted = converted.convert("RGB")
+        converted.save(output_pdf_path, "PDF", resolution=300.0)
+
+
+def _render_pdf_page_screenshots(
+    pdf_path: Path,
+    *,
+    output_dir: Path,
+    page_count: int,
+    dpi: int,
+) -> ArtifactRef:
+    if page_count <= 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_dir / "page_manifest.jsonl"
+        manifest_path.write_text("", encoding="utf-8")
+        return ArtifactRef(
+            kind="page_screenshots_manifest",
+            uri=str(manifest_path),
+            meta={"page_count": 0, "dpi": dpi},
+        )
+    if dpi <= 0:
+        raise ValueError("page_screenshot_dpi must be greater than 0")
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm is None:
+        raise RuntimeError("pdftoppm is required for page screenshot export")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "page_manifest.jsonl"
+    manifest_rows: list[dict[str, Any]] = []
+    for page_number in range(1, page_count + 1):
+        prefix = output_dir / f"page_{page_number:04d}"
+        png_path = output_dir / f"page_{page_number:04d}.png"
+        _unlink_if_exists(png_path)
+        command = [
+            pdftoppm,
+            "-f",
+            str(page_number),
+            "-l",
+            str(page_number),
+            "-r",
+            str(dpi),
+            "-png",
+            "-singlefile",
+            str(pdf_path),
+            str(prefix),
+        ]
+        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "pdftoppm failed while exporting page screenshots: "
+                f"{completed.stderr.strip() or completed.stdout.strip()}"
+            )
+        if not png_path.exists():
+            raise RuntimeError(f"pdftoppm did not create expected screenshot: {png_path}")
+        width, height = _read_image_size(png_path)
+        manifest_rows.append(
+            {
+                "page_index": page_number - 1,
+                "page_number": page_number,
+                "image_path": str(png_path),
+                "source_pdf": str(pdf_path),
+                "dpi": dpi,
+                "width": width,
+                "height": height,
+            }
+        )
+    manifest_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in manifest_rows),
+        encoding="utf-8",
+    )
+    return ArtifactRef(
+        kind="page_screenshots_manifest",
+        uri=str(manifest_path),
+        meta={"page_count": page_count, "dpi": dpi, "output_dir": str(output_dir)},
+    )
+
+
+def _read_image_size(image_path: Path) -> tuple[int | None, int | None]:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError:
+        return None, None
+    with Image.open(image_path) as image:
+        return int(image.width), int(image.height)
 
 
 def _write_batch_csv(path: Path, items: list[PdfFileExtractResult]) -> None:
@@ -863,6 +1062,9 @@ def _write_batch_csv(path: Path, items: list[PdfFileExtractResult]) -> None:
         "table_cell_count",
         "table_engine",
         "paddle_table_mode",
+        "input_type",
+        "converted_pdf_path",
+        "page_screenshots_manifest",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -876,6 +1078,14 @@ def _find_artifact_uri(artifacts: list[Any], kind: str) -> str | None:
     for artifact in artifacts:
         if getattr(artifact, "kind", None) == kind:
             return getattr(artifact, "uri", None)
+    return None
+
+
+def _artifact_uri(artifacts: list[Any], kind: str) -> str | None:
+    for artifact in artifacts:
+        if isinstance(artifact, dict) and artifact.get("kind") == kind:
+            uri = artifact.get("uri")
+            return str(uri) if uri is not None else None
     return None
 
 

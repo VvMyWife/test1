@@ -206,3 +206,52 @@ PY
 docker compose exec mineru-operator tail -n 100 /workspace/logs/mineru-api-8000.log
 docker compose exec mineru-operator tail -n 100 /workspace/logs/paddle-table-api-8200.log
 ```
+
+## 图片输入和整页截图
+
+批处理目录支持：
+
+```text
+.pdf, .jpg, .jpeg, .png, .bmp, .tif, .tiff
+```
+
+图片会在算子内部自动转换成单页 PDF，然后继续走原有 MinerU/Paddle 流程。转换产物位于单文档 artifact 目录：
+
+```text
+output/15/
+└── 15.converted.pdf
+```
+
+整页截图导出默认关闭。开启方式：
+
+```bash
+ENABLE_PAGE_SCREENSHOTS=true PAGE_SCREENSHOT_DPI=144 \
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input \
+  --output-dir /workspace/output/ocr_with_screenshots \
+  --table-engine ocr \
+  --concurrency 4 \
+  --overwrite
+```
+
+或直接使用 CLI 参数：
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input/5.pdf \
+  --output-dir /workspace/output/single_with_screenshots \
+  --table-engine ocr \
+  --enable-page-screenshots \
+  --page-screenshot-dpi 144 \
+  --overwrite
+```
+
+输出结构：
+
+```text
+output/5/
+└── page_screenshots/
+    ├── page_0001.png
+    ├── page_0002.png
+    └── page_manifest.jsonl
+```

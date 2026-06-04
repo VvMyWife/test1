@@ -13,6 +13,8 @@ CONCURRENCY="${CONCURRENCY:-12}"
 INPUT_DIR="${INPUT_DIR:-${WORKSPACE_ROOT}/input}"
 OUTPUT_DIR="${OUTPUT_DIR:-${WORKSPACE_ROOT}/output/${TABLE_ENGINE}}"
 OVERWRITE="${OVERWRITE:-true}"
+ENABLE_PAGE_SCREENSHOTS="${ENABLE_PAGE_SCREENSHOTS:-false}"
+PAGE_SCREENSHOT_DPI="${PAGE_SCREENSHOT_DPI:-144}"
 
 if [[ "${TABLE_ENGINE}" == "paddle" ]]; then
   export PADDLE_TABLE_API_URL="${PADDLE_TABLE_API_URL:-http://127.0.0.1:8200}"
@@ -27,10 +29,15 @@ args=(
   --output-dir "${OUTPUT_DIR}"
   --table-engine "${TABLE_ENGINE}"
   --concurrency "${CONCURRENCY}"
+  --page-screenshot-dpi "${PAGE_SCREENSHOT_DPI}"
 )
 
 if [[ "${OVERWRITE}" == "true" ]]; then
   args+=(--overwrite)
+fi
+
+if [[ "${ENABLE_PAGE_SCREENSHOTS}" == "true" || "${ENABLE_PAGE_SCREENSHOTS}" == "1" ]]; then
+  args+=(--enable-page-screenshots)
 fi
 
 exec "${MINERU_VENV}/bin/python" "${APP_ROOT}/scripts/run-daft-batch-operate.py" "${args[@]}"

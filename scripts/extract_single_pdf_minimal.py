@@ -10,6 +10,14 @@ WORKSPACE = Path(
     or Path(__file__).resolve().parents[1]
 ).expanduser().resolve()
 TABLE_ENGINE = os.environ.get("TABLE_ENGINE", "ocr").strip().lower()
+ENABLE_PAGE_SCREENSHOTS = os.environ.get("ENABLE_PAGE_SCREENSHOTS", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "y",
+    "on",
+}
+PAGE_SCREENSHOT_DPI = int(os.environ.get("PAGE_SCREENSHOT_DPI", "144"))
 DEFAULT_INPUT_PDF = WORKSPACE / "input" / "5.pdf"
 if not DEFAULT_INPUT_PDF.exists():
     DEFAULT_INPUT_PDF = WORKSPACE / "data" / "input" / "5.pdf"
@@ -27,6 +35,8 @@ result = extract_pdf_file(
     output_dir=OUTPUT_DIR,
     table_engine=TABLE_ENGINE,
     overwrite=True,
+    enable_page_screenshots=ENABLE_PAGE_SCREENSHOTS,
+    page_screenshot_dpi=PAGE_SCREENSHOT_DPI,
 )
 
 print("success:", result.success)
@@ -35,3 +45,6 @@ print("error_report:", result.error_report)
 print("table_engine:", result.table_engine)
 print("mineru_extra_args:", result.mineru_extra_args)
 print("table_cell_count:", result.table_cell_count)
+print("input_type:", result.input_type)
+print("converted_pdf_path:", result.converted_pdf_path)
+print("page_screenshots_manifest:", result.page_screenshots_manifest)
