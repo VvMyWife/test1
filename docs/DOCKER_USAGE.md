@@ -222,27 +222,29 @@ output/15/
 └── 15.converted.pdf
 ```
 
-整页截图导出默认关闭。开启方式：
+整页截图导出默认关闭。推荐直接用 CLI 参数开启：
 
 ```bash
-ENABLE_PAGE_SCREENSHOTS=true PAGE_SCREENSHOT_DPI=144 \
 docker compose exec mineru-operator mineru-operator-batch \
   /workspace/input \
   --output-dir /workspace/output/ocr_with_screenshots \
   --table-engine ocr \
   --concurrency 4 \
+  --enable-page-screenshots \
+  --page-screenshot-dpi 144 \
   --overwrite
 ```
 
-或直接使用 CLI 参数：
+如果需要用环境变量控制已经运行的容器，必须通过 `docker compose exec -e` 传入：
 
 ```bash
-docker compose exec mineru-operator mineru-operator-batch \
+docker compose exec \
+  -e ENABLE_PAGE_SCREENSHOTS=true \
+  -e PAGE_SCREENSHOT_DPI=144 \
+  mineru-operator mineru-operator-batch \
   /workspace/input/5.pdf \
   --output-dir /workspace/output/single_with_screenshots \
   --table-engine ocr \
-  --enable-page-screenshots \
-  --page-screenshot-dpi 144 \
   --overwrite
 ```
 
