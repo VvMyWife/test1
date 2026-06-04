@@ -10,7 +10,8 @@ from platform_foundation.ocr import extract_pdf_dir, extract_pdf_file
 # This file intentionally has no argparse and no sys.path modification.
 # It shows how another Python project should call the installed internal package.
 
-os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:8200")
+os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:18000")
+os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:18200")
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 INPUT_PDF = WORKSPACE / "data" / "input" / "5.pdf"

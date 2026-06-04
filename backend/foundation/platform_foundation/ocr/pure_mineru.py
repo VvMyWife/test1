@@ -12,7 +12,7 @@ from ..contracts import ArtifactRef, DocumentItem, ParsedPdf, TableBlock, TextBl
 from ..operators import LayoutExtractMinerUOperator, LayoutExtractMinerUPaddleTableOperator
 from .mineru_layout import MinerULayoutOperateResult, operate
 
-DEFAULT_MINERU_API_URL = "http://127.0.0.1:8000"
+DEFAULT_MINERU_API_URL = "http://127.0.0.1:18000"
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 
 

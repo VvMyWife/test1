@@ -22,9 +22,9 @@ OUTPUT_DIR = Path(
     )
 ).expanduser().resolve()
 
-os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:8000")
+os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:18000")
 if TABLE_ENGINE == "paddle":
-    os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:8200")
+    os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:18200")
 
 report = extract_pdf_dir(
     INPUT_DIR,

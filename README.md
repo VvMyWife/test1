@@ -79,10 +79,9 @@ docker compose up -d --build
 
 首次启动 Paddle Table API 会下载并预加载 PaddleX 模型，可能需要数分钟；模型会缓存在 `.cache/paddlex`，后续重启会复用。
 
-如果同一台机器上已经占用了 `8000/8200`，可以换宿主端口：
+默认宿主机监听端口是 `18000/18200`，容器内部服务仍然是 `8000/8200`：
 
 ```bash
-MINERU_API_HOST_PORT=18000 PADDLE_TABLE_API_HOST_PORT=18200 docker compose up -d --build
 curl http://127.0.0.1:18000/health
 curl http://127.0.0.1:18200/health
 ```
@@ -97,8 +96,8 @@ BASE_IMAGE=mineru:latest docker compose up -d --build
 
 ```bash
 docker compose logs -f mineru-operator
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8200/health
+curl http://127.0.0.1:18000/health
+curl http://127.0.0.1:18200/health
 ```
 
 如果只想跑纯 OCR、省显存：

@@ -12,7 +12,7 @@ from platform_foundation.ocr import extract_pdf
 result = extract_pdf(
     "$WORKSPACE/input/doc-001.pdf",
     output_dir="$WORKSPACE/output/doc-001",
-    api_url="http://127.0.0.1:8000",
+    api_url="http://127.0.0.1:18000",
     timeout_seconds=1800,
 )
 ```
@@ -21,7 +21,7 @@ Daft 批处理脚本也支持命令行超时：
 
 ```bash
 python $WORKSPACE/platform-core-public-feature-foundation-base-operator/scripts/run-daft-batch-operate.py \
-  --api-url http://127.0.0.1:8000 \
+  --api-url http://127.0.0.1:18000 \
   --input-dir $WORKSPACE/input \
   --output-dir $WORKSPACE/output \
   --timeout-seconds 1800
@@ -168,7 +168,7 @@ python $WORKSPACE/platform-core-public-feature-foundation-base-operator/scripts/
 1. 看 `batch_report.json` 的 `failure_count`、`total_elapsed_seconds` 和每个 item 的 `elapsed_seconds`。
 2. 如果某个 PDF 失败，看对应 `<pdf_name>.error.json`。
 3. 如果大量 PDF 同时报错，看 MinerU API 日志是否有模型加载、端口、显存/内存或 HTTP 500 问题。
-4. 如果所有 PDF 耗时接近且都很慢，确认命令里是否传了 `--api-url http://127.0.0.1:8000`。
+4. 如果所有 PDF 耗时接近且都很慢，确认命令里是否传了 `--api-url http://127.0.0.1:18000`。
 5. 如果只有含表格的 PDF 很慢，确认是否开启了 Paddle 表格 OCR；CPU 环境默认不建议开启 Paddle 文本 OCR。
 6. 如果 `middle_json` 存在但 `<pdf_name>.json` 不存在，说明 MinerU 已产出但算子转换阶段失败，优先看 `<pdf_name>.error.json`。
 

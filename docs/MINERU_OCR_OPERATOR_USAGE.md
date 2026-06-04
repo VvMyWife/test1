@@ -12,7 +12,7 @@ from platform_foundation.ocr import extract_pdf
 result = extract_pdf(
     "$WORKSPACE/input/example.pdf",
     output_dir="$WORKSPACE/output/example",
-    api_url="http://127.0.0.1:8000",
+    api_url="http://127.0.0.1:18000",
     timeout_seconds=1800,
 )
 
@@ -41,7 +41,7 @@ Path("$WORKSPACE/output/example.json").write_text(
 
 ```bash
 cd $WORKSPACE/platform-core-public-feature-foundation-base-operator
-export MINERU_API_URL=http://127.0.0.1:8000
+export MINERU_API_URL=http://127.0.0.1:18000
 
 python scripts/run-daft-batch-operate.py \
   input \
@@ -121,7 +121,7 @@ curl \
 
 ## 4. 服务约定
 
-- 默认 MinerU 原生 API 地址是 `http://127.0.0.1:8000`。
+- 默认 MinerU 原生 API 地址是 `http://127.0.0.1:18000`。
 - 当前封装 HTTP API 地址是 `http://127.0.0.1:8001`。
 - 脚本和 Python 入口默认复用常驻 MinerU API，不再为每个 PDF 临时启动本地服务。
 - 如果服务部署在其他地址，设置 `MINERU_API_URL` 或传 `--api-url`。

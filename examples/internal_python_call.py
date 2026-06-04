@@ -9,8 +9,8 @@ input_dir = Path(os.environ.get("INPUT_DIR", workspace / "input")).expanduser().
 input_pdf = Path(os.environ.get("INPUT_PDF", input_dir / "5.pdf")).expanduser().resolve()
 output_dir = Path(os.environ.get("OUTPUT_DIR", workspace / "output")).expanduser().resolve()
 
-os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:8000")
-os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:8200")
+os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:18000")
+os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:18200")
 
 
 pdf_result = extract_pdf_file(

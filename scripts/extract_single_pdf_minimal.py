@@ -18,9 +18,9 @@ OUTPUT_DIR = Path(
     os.environ.get("OUTPUT_DIR", str(WORKSPACE / "output" / f"single_{TABLE_ENGINE}"))
 ).expanduser().resolve()
 
-os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:8000")
+os.environ.setdefault("MINERU_API_URL", "http://127.0.0.1:18000")
 if TABLE_ENGINE == "paddle":
-    os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:8200")
+    os.environ.setdefault("PADDLE_TABLE_API_URL", "http://127.0.0.1:18200")
 
 result = extract_pdf_file(
     INPUT_PDF,

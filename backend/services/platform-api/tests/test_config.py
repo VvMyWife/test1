@@ -12,7 +12,7 @@ def test_load_settings_from_env_keeps_portable_defaults() -> None:
     assert settings.upload_temp_root == "/workspace/data"
     assert settings.mineru_cli.command == ("mineru",)
     assert settings.mineru_cli.output_root == "/workspace/data"
-    assert settings.mineru_cli.api_url == "http://127.0.0.1:8000"
+    assert settings.mineru_cli.api_url == "http://127.0.0.1:18000"
     assert settings.mineru_cli.extra_args == ()
 
 

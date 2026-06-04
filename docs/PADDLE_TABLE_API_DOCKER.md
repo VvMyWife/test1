@@ -15,8 +15,8 @@
 ```bash
 mkdir -p data/input output logs run .cache/mineru-operator
 docker compose up -d --build
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8200/health
+curl http://127.0.0.1:18000/health
+curl http://127.0.0.1:18200/health
 ```
 
 Paddle 批处理：
@@ -34,7 +34,7 @@ docker compose exec mineru-operator mineru-operator-batch \
 
 ```bash
 bash scripts/start-paddle-table-api-docker.sh
-curl http://127.0.0.1:8200/health
+curl http://127.0.0.1:18200/health
 ```
 
 注意：单独 Paddle API 仍然要求 API 容器能看到调用方传入的 PDF 和表格裁剪图路径。生产使用时不要跨服务器传本机路径；应在目标服务器本地启动完整 `mineru-operator` 容器。

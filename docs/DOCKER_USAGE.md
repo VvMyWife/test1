@@ -68,16 +68,16 @@ docker compose up -d --build
 默认会启动：
 
 ```text
-MinerU API:       http://127.0.0.1:8000
-Paddle Table API: http://127.0.0.1:8200
+MinerU API:       http://127.0.0.1:18000
+Paddle Table API: http://127.0.0.1:18200
 ```
 
 如果宿主机端口已被占用：
 
 ```bash
-MINERU_API_HOST_PORT=18000 PADDLE_TABLE_API_HOST_PORT=18200 docker compose up -d --build
-curl http://127.0.0.1:18000/health
-curl http://127.0.0.1:18200/health
+MINERU_API_HOST_PORT=19000 PADDLE_TABLE_API_HOST_PORT=19200 docker compose up -d --build
+curl http://127.0.0.1:19000/health
+curl http://127.0.0.1:19200/health
 ```
 
 如果 compose 构建时要复用本机已有基础镜像：
@@ -89,8 +89,8 @@ BASE_IMAGE=mineru:latest docker compose up -d --build
 验证：
 
 ```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8200/health
+curl http://127.0.0.1:18000/health
+curl http://127.0.0.1:18200/health
 ```
 
 只跑 OCR、不开 Paddle：
