@@ -30,8 +30,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_TABLE_API_PRELOAD_MODES=table_structure,ppstructurev3 \
     PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS= \
     ENABLE_PADDLE_API=true \
-    ENABLE_PAGE_SCREENSHOTS=false \
-    PAGE_SCREENSHOT_DPI=144 \
     XDG_CACHE_HOME=/workspace/.cache \
     HF_HOME=/workspace/.cache/huggingface \
     MODELSCOPE_CACHE=/workspace/.cache/modelscope \
@@ -97,6 +95,9 @@ RUN /opt/venvs/mineru/bin/python -m pip install -e /opt/mineru_workspace/backend
     && chmod +x /opt/mineru_workspace/docker/entrypoint.sh \
     && chmod +x /opt/mineru_workspace/docker/operator-batch.sh \
     && ln -sf /opt/mineru_workspace/docker/operator-batch.sh /usr/local/bin/mineru-operator-batch
+
+ENV ENABLE_PAGE_SCREENSHOTS=false \
+    PAGE_SCREENSHOT_DPI=144
 
 ENV PATH=/opt/venvs/mineru/bin:${PATH}
 WORKDIR /workspace
