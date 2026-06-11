@@ -300,6 +300,41 @@ output/15/
 └── 15.converted.pdf
 ```
 
+递归处理业务文件夹时，输出会保留输入文件相对目录，避免所有文件被拍平到同一层：
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input/liqizhi_0610 \
+  --output-dir /workspace/output/ocr_qizhi \
+  --table-engine ocr \
+  --concurrency 12 \
+  --overwrite \
+  --recursive
+```
+
+例如输入：
+
+```text
+/workspace/input/liqizhi_0610/
+└── 3-WS-001/
+    ├── 0189.jpg
+    └── 0190.pdf
+```
+
+输出会保持为：
+
+```text
+/workspace/output/ocr_qizhi/
+└── 3-WS-001/
+    ├── 0189.json
+    ├── 0189/
+    │   ├── auto/
+    │   └── 0189.converted.pdf
+    ├── 0190.json
+    └── 0190/
+        └── auto/
+```
+
 整页截图导出默认关闭。推荐直接用 CLI 参数显式开启：
 
 ```bash
@@ -330,6 +365,7 @@ docker compose exec \
 
 ```text
 output/5/
+├── auto/
 └── page_screenshots/
     ├── page_0001.png
     ├── page_0002.png

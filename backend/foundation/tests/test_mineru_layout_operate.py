@@ -409,3 +409,84 @@ def test_extract_pdf_dir_scans_images_and_pdfs(tmp_path: Path) -> None:
     image_item = next(item for item in report.items if item.source_file_name == "photo.jpg")
     assert image_item.input_type == "image"
     assert image_item.converted_pdf_path is not None
+
+
+def test_extract_pdf_dir_preserves_recursive_relative_directories(tmp_path: Path) -> None:
+    from PIL import Image
+
+    input_dir = tmp_path / "input"
+    nested_dir = input_dir / "3-WS-001"
+    nested_dir.mkdir(parents=True)
+    Image.new("RGB", (24, 24), (255, 255, 255)).save(nested_dir / "0189.jpg")
+    artifact = ArtifactRef(kind="middle_json", uri="/tmp/doc_middle.json")
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text=Path(document["file_uri"]).name,
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    report = extract_pdf_dir(
+        input_dir,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+        concurrency=1,
+        recursive=True,
+        overwrite=True,
+    )
+
+    item = report.items[0]
+    assert item.relative_input_path == "3-WS-001/0189.jpg"
+    assert item.output_relative_dir == "3-WS-001"
+    assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0189.json"
+    assert Path(item.artifact_dir) == tmp_path / "output" / "3-WS-001" / "0189"
+    assert Path(item.converted_pdf_path or "") == tmp_path / "output" / "3-WS-001" / "0189" / "0189.converted.pdf"
+
+
+def test_extract_pdf_dir_preserves_direct_business_folder_name(tmp_path: Path) -> None:
+    input_dir = tmp_path / "3-WS-001"
+    input_dir.mkdir()
+    (input_dir / "0190.pdf").write_bytes(b"%PDF-1.4\n")
+    artifact = ArtifactRef(kind="middle_json", uri="/tmp/doc_middle.json")
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text=Path(document["file_uri"]).name,
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    report = extract_pdf_dir(
+        input_dir,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+        concurrency=1,
+        overwrite=True,
+    )
+
+    item = report.items[0]
+    assert item.relative_input_path == "0190.pdf"
+    assert item.output_relative_dir == "3-WS-001"
+    assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0190.json"
+    assert Path(item.artifact_dir) == tmp_path / "output" / "3-WS-001" / "0190"

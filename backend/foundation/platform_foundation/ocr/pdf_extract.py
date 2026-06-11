@@ -32,6 +32,8 @@ SUPPORTED_PDF_SUFFIXES = {".pdf"}
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 SUPPORTED_INPUT_SUFFIXES = SUPPORTED_PDF_SUFFIXES | SUPPORTED_IMAGE_SUFFIXES
 DEFAULT_PAGE_SCREENSHOT_DPI = 144
+GENERIC_FLAT_INPUT_DIR_NAMES = {"input", "inputs"}
+INVALID_PATH_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
 
 class PdfFileExtractResult(BaseModel):
@@ -68,6 +70,8 @@ class PdfFileExtractResult(BaseModel):
     input_type: str = "pdf"
     converted_pdf_path: str | None = None
     page_screenshots_manifest: str | None = None
+    relative_input_path: str | None = None
+    output_relative_dir: str | None = None
 
 
 class PdfDirExtractReport(BaseModel):
@@ -419,10 +423,10 @@ class MinerUPdfDirBatchOperator:
         )
         selected_engine = _resolve_batch_engine(engine=engine, concurrency=concurrency)
         tasks = [
-            _BatchTask(
-                pdf_path=pdf,
-                source_file_name=pdf.name,
-                output_dir=output_root,
+            self._build_task(
+                pdf,
+                input_root=input_root,
+                output_root=output_root,
                 table_engine=resolved_table_engine,
                 paddle_table_mode=paddle_table_mode,
                 paddle_device=paddle_device,
@@ -437,9 +441,9 @@ class MinerUPdfDirBatchOperator:
         if selected_engine == "sequential":
             items = [self._run_task(task, None, 1, lock_acquire_timeout_seconds) for task in tasks]
         elif selected_engine == "thread":
-            items = self._run_threaded(tasks, concurrency, lock_acquire_timeout_seconds)
+            items = self._run_threaded(tasks, output_root, concurrency, lock_acquire_timeout_seconds)
         else:
-            items = self._run_daft(tasks, concurrency, lock_acquire_timeout_seconds)
+            items = self._run_daft(tasks, output_root, concurrency, lock_acquire_timeout_seconds)
 
         return self._write_report(
             input_root=input_root,
@@ -452,6 +456,40 @@ class MinerUPdfDirBatchOperator:
             enable_page_screenshots=enable_page_screenshots,
             started_at=started,
             items=items,
+        )
+
+    def _build_task(
+        self,
+        pdf: Path,
+        *,
+        input_root: Path,
+        output_root: Path,
+        table_engine: str,
+        paddle_table_mode: str,
+        paddle_device: str | None,
+        resume: bool,
+        overwrite: bool,
+        enable_page_screenshots: bool,
+        page_screenshot_dpi: int,
+    ) -> "_BatchTask":
+        task_output_dir, output_relative_dir = _output_dir_for_input_file(
+            pdf,
+            input_root=input_root,
+            output_root=output_root,
+        )
+        return _BatchTask(
+            pdf_path=pdf,
+            source_file_name=pdf.name,
+            relative_input_path=_relative_input_path(pdf, input_root=input_root),
+            output_dir=task_output_dir,
+            output_relative_dir=output_relative_dir,
+            table_engine=table_engine,
+            paddle_table_mode=paddle_table_mode,
+            paddle_device=paddle_device,
+            resume=resume,
+            overwrite=overwrite,
+            enable_page_screenshots=enable_page_screenshots,
+            page_screenshot_dpi=page_screenshot_dpi,
         )
 
     def _run_task(
@@ -469,6 +507,8 @@ class MinerUPdfDirBatchOperator:
                 table_engine=task.table_engine,
                 paddle_table_mode=task.paddle_table_mode,
                 file_operator=self.file_operator,
+                relative_input_path=task.relative_input_path,
+                output_relative_dir=task.output_relative_dir,
             )
             if existing is not None:
                 return existing
@@ -480,7 +520,7 @@ class MinerUPdfDirBatchOperator:
             timeout_seconds=lock_acquire_timeout_seconds,
         ):
             queue_wait_seconds = time.perf_counter() - wait_started
-            return self.file_operator.extract_file(
+            result = self.file_operator.extract_file(
                 task.pdf_path,
                 output_dir=task.output_dir,
                 table_engine=task.table_engine,
@@ -492,14 +532,21 @@ class MinerUPdfDirBatchOperator:
                 page_screenshot_dpi=task.page_screenshot_dpi,
                 queue_wait_seconds=queue_wait_seconds,
             )
+            return result.model_copy(
+                update={
+                    "relative_input_path": task.relative_input_path,
+                    "output_relative_dir": task.output_relative_dir,
+                }
+            )
 
     def _run_threaded(
         self,
         tasks: list["_BatchTask"],
+        output_root: Path,
         concurrency: int,
         lock_acquire_timeout_seconds: float,
     ) -> list[PdfFileExtractResult]:
-        lock_dir = tasks[0].output_dir / ".mineru_concurrency_locks"
+        lock_dir = output_root / ".mineru_concurrency_locks"
         results: list[PdfFileExtractResult | None] = [None] * len(tasks)
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_index = {
@@ -513,17 +560,20 @@ class MinerUPdfDirBatchOperator:
     def _run_daft(
         self,
         tasks: list["_BatchTask"],
+        output_root: Path,
         concurrency: int,
         lock_acquire_timeout_seconds: float,
     ) -> list[PdfFileExtractResult]:
         daft = _import_daft()
         extract_udf = _build_daft_udf(daft, concurrency)
-        lock_dir = tasks[0].output_dir / ".mineru_concurrency_locks"
+        lock_dir = output_root / ".mineru_concurrency_locks"
         df = daft.from_pydict(
             {
                 "pdf_path": [str(task.pdf_path) for task in tasks],
                 "source_file_name": [task.source_file_name for task in tasks],
+                "relative_input_path": [task.relative_input_path for task in tasks],
                 "output_dir": [str(task.output_dir) for task in tasks],
+                "output_relative_dir": [task.output_relative_dir or "" for task in tasks],
                 "table_engine": [task.table_engine for task in tasks],
                 "paddle_table_mode": [task.paddle_table_mode for task in tasks],
                 "paddle_device": [task.paddle_device or "" for task in tasks],
@@ -556,7 +606,9 @@ class MinerUPdfDirBatchOperator:
             extract_udf(
                 daft.col("pdf_path"),
                 daft.col("source_file_name"),
+                daft.col("relative_input_path"),
                 daft.col("output_dir"),
+                daft.col("output_relative_dir"),
                 daft.col("table_engine"),
                 daft.col("paddle_table_mode"),
                 daft.col("paddle_device"),
@@ -649,7 +701,9 @@ class _BatchTask(BaseModel):
 
     pdf_path: Path
     source_file_name: str
+    relative_input_path: str | None = None
     output_dir: Path
+    output_relative_dir: str | None = None
     table_engine: str
     paddle_table_mode: str
     paddle_device: str | None
@@ -722,7 +776,9 @@ def _pop_operator_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 def _extract_file_for_daft(
     pdf_path: str,
     source_file_name: str,
+    relative_input_path: str | None,
     output_dir: str,
+    output_relative_dir: str,
     table_engine: str,
     paddle_table_mode: str,
     paddle_device: str,
@@ -759,7 +815,9 @@ def _extract_file_for_daft(
     task = _BatchTask(
         pdf_path=Path(pdf_path),
         source_file_name=source_file_name,
+        relative_input_path=relative_input_path or None,
         output_dir=Path(output_dir),
+        output_relative_dir=output_relative_dir or None,
         table_engine=table_engine,
         paddle_table_mode=paddle_table_mode,
         paddle_device=paddle_device or None,
@@ -777,7 +835,9 @@ def _build_daft_udf(daft: Any, max_concurrency: int) -> Any:
     async def extract_file_udf(  # noqa: PLR0913
         pdf_path: str,
         source_file_name: str,
+        relative_input_path: str,
         output_dir: str,
+        output_relative_dir: str,
         table_engine: str,
         paddle_table_mode: str,
         paddle_device: str,
@@ -802,7 +862,9 @@ def _build_daft_udf(daft: Any, max_concurrency: int) -> Any:
             _extract_file_for_daft,
             pdf_path,
             source_file_name,
+            relative_input_path,
             output_dir,
+            output_relative_dir,
             table_engine,
             paddle_table_mode,
             paddle_device,
@@ -856,6 +918,8 @@ def _result_from_existing_json(
     table_engine: str,
     paddle_table_mode: str,
     file_operator: MinerUPdfFileOperator,
+    relative_input_path: str | None = None,
+    output_relative_dir: str | None = None,
 ) -> PdfFileExtractResult | None:
     output_stem = _safe_stem(source_file_name or pdf_path.name)
     json_path = output_dir / f"{output_stem}.json"
@@ -905,6 +969,8 @@ def _result_from_existing_json(
         input_type="image" if _is_image_file(pdf_path) else "pdf",
         converted_pdf_path=converted_pdf_path,
         page_screenshots_manifest=page_screenshots_manifest,
+        relative_input_path=relative_input_path,
+        output_relative_dir=output_relative_dir,
     )
 
 
@@ -933,6 +999,58 @@ def _list_input_files(input_root: Path, *, recursive: bool) -> list[Path]:
         seen.add(key)
         inputs.append(resolved)
     return inputs
+
+
+def _relative_input_path(input_path: Path, *, input_root: Path) -> str:
+    if input_root.is_file():
+        return input_path.name
+    try:
+        return input_path.relative_to(input_root).as_posix()
+    except ValueError:
+        return input_path.name
+
+
+def _output_dir_for_input_file(
+    input_path: Path,
+    *,
+    input_root: Path,
+    output_root: Path,
+) -> tuple[Path, str | None]:
+    if input_root.is_file():
+        return output_root, None
+
+    try:
+        relative_parent = input_path.relative_to(input_root).parent
+    except ValueError:
+        relative_parent = Path()
+
+    if relative_parent == Path("."):
+        if input_root.name.strip().lower() in GENERIC_FLAT_INPUT_DIR_NAMES:
+            return output_root, None
+        output_relative_dir = Path(_safe_path_part(input_root.name))
+    else:
+        output_relative_dir = _safe_relative_dir(relative_parent)
+
+    if not output_relative_dir.parts:
+        return output_root, None
+    return output_root / output_relative_dir, output_relative_dir.as_posix()
+
+
+def _safe_relative_dir(relative_dir: Path) -> Path:
+    safe_parts = [
+        _safe_path_part(part)
+        for part in relative_dir.parts
+        if part not in {"", "."}
+    ]
+    safe_parts = [part for part in safe_parts if part]
+    if not safe_parts:
+        return Path()
+    return Path(*safe_parts)
+
+
+def _safe_path_part(value: str) -> str:
+    safe = INVALID_PATH_CHARS_RE.sub("_", value).strip(" ._")
+    return safe or "unnamed"
 
 
 def _is_image_file(path: Path) -> bool:
@@ -1063,6 +1181,8 @@ def _write_batch_csv(path: Path, items: list[PdfFileExtractResult]) -> None:
         "table_engine",
         "paddle_table_mode",
         "input_type",
+        "relative_input_path",
+        "output_relative_dir",
         "converted_pdf_path",
         "page_screenshots_manifest",
     ]
@@ -1100,7 +1220,7 @@ def _resolve_api_url(api_url: str | None) -> str:
 
 def _safe_stem(value: str) -> str:
     stem = Path(value).stem or value
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._")
+    safe = INVALID_PATH_CHARS_RE.sub("_", stem).strip(" ._")
     return safe or "document"
 
 
