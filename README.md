@@ -130,6 +130,26 @@ docker compose exec mineru-operator mineru-operator-batch \
   --overwrite
 ```
 
+Paddle 指定字段坐标与 PDF 标注：
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input/5.pdf \
+  --output-dir /workspace/output/paddle_fields \
+  --table-engine paddle \
+  --field-keywords 身份证号,姓名 \
+  --overwrite
+```
+
+开启 `--field-keywords` 后，每个文档目录会额外生成：
+
+```text
+5.field_coordinates.json
+5.field_annotations.pdf
+```
+
+`field_coordinates.json` 会按页面和坐标顺序输出命中的字段、所在表格 cell、`x/y/w/h`、四点坐标，以及换算后的 PDF 点坐标；`field_annotations.pdf` 会在对应位置画框标注。该能力主要用于 `table_engine=paddle` 的表格 cell 坐标。
+
 输出文件在宿主机：
 
 ```bash
@@ -159,8 +179,11 @@ result = extract_pdf_file(
     "data/input/5.pdf",
     output_dir="output/single",
     table_engine="paddle",
+    field_keywords=["身份证号", "姓名"],
 )
 print(result.json_path)
+print(result.field_coordinates_path)
+print(result.field_annotation_pdf_path)
 
 report = extract_pdf_dir(
     "data/input",
@@ -235,7 +258,7 @@ docker compose up -d
 - `table_engine="ocr"` 保持 MinerU 原生输出，不做 Paddle 伪装。
 - `table_engine="paddle"` 必须调用 Paddle Table API；如果 Paddle 失败，算子返回失败，不静默降级成 OCR。
 - 并发只由调用参数 `--concurrency` 或 `concurrency=` 控制；服务器不再硬编码每台机器相同的算子限流。
-- `batch_report.json` 包含 `page_count` 和 `pages_per_second`，方便按页评估吞吐。
+- `batch_report.json` 包含 `page_count` 和 `seconds_per_page`，单位是秒/页，方便按页评估耗时。
 
 ## 常用排查
 

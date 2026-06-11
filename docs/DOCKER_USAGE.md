@@ -123,6 +123,26 @@ docker compose exec mineru-operator mineru-operator-batch \
 
 Paddle 模式必须看到 `table_cell_count > 0` 才说明表格增强真正生效。算子不会把 Paddle 失败伪装成 OCR 成功。
 
+指定字段坐标和 PDF 标注：
+
+```bash
+docker compose exec mineru-operator mineru-operator-batch \
+  /workspace/input/5.pdf \
+  --output-dir /workspace/output/paddle_fields \
+  --table-engine paddle \
+  --field-keywords 身份证号,姓名 \
+  --overwrite
+```
+
+输出目录会额外包含：
+
+```text
+5.field_coordinates.json
+5.field_annotations.pdf
+```
+
+`5.field_coordinates.json` 按顺序记录字段命中、表格 cell、原始坐标、四点坐标和 PDF 点坐标；`5.field_annotations.pdf` 会把命中位置框出来。
+
 ## 7. 单文件
 
 ```bash

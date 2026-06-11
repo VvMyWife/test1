@@ -17,7 +17,7 @@ from typing import Any
 DEFAULT_ENGINES = ("ocr", "paddle")
 DEFAULT_CONCURRENCY_VALUES = (1, 2, 4, 8, 12, 16, 24, 32)
 DEFAULT_API_CONCURRENCY_VALUES = (1, 2, 4, 8, 12, 16, 24, 32, 64, 128)
-STATE_VERSION = 2
+STATE_VERSION = 3
 
 
 def main() -> int:
@@ -427,7 +427,7 @@ def run_trial(
         "batch_report_path": str(host_report_path) if host_report_path.exists() else None,
         "total_elapsed_seconds": report.get("total_elapsed_seconds") if report else None,
         "page_count": report.get("page_count") if report else None,
-        "pages_per_second": report.get("pages_per_second") if report else None,
+        "seconds_per_page": report_seconds_per_page(report) if report else None,
         "pdf_count": report.get("pdf_count") if report else None,
         "success_count": report.get("success_count") if report else None,
         "failure_count": report.get("failure_count") if report else None,
@@ -465,6 +465,34 @@ def load_report(path: Path) -> dict[str, Any]:
             return json.load(handle)
     except Exception as exc:
         return {"_report_read_error": str(exc)}
+
+
+def report_seconds_per_page(report: dict[str, Any]) -> float | None:
+    value = report.get("seconds_per_page")
+    if value is not None:
+        return float(value)
+    page_count = report.get("page_count") or 0
+    elapsed = report.get("total_elapsed_seconds") or 0
+    if page_count:
+        return round(float(elapsed) / float(page_count), 3)
+    pages_per_second = report.get("pages_per_second") or 0
+    if pages_per_second:
+        return round(1 / float(pages_per_second), 3)
+    return None
+
+
+def trial_seconds_per_page(trial: dict[str, Any]) -> float:
+    value = trial.get("seconds_per_page")
+    if value is not None:
+        return float(value)
+    page_count = trial.get("page_count") or 0
+    elapsed = trial.get("total_elapsed_seconds") or 0
+    if page_count:
+        return round(float(elapsed) / float(page_count), 3)
+    pages_per_second = trial.get("pages_per_second") or 0
+    if pages_per_second:
+        return round(1 / float(pages_per_second), 3)
+    return float("inf")
 
 
 def determine_status(return_code: int, report: dict[str, Any]) -> str:
@@ -537,7 +565,7 @@ def print_trial(trial: dict[str, Any]) -> None:
         f"mineru_api_max={trial.get('mineru_api_max_concurrency')} "
         f"paddle_api_max={trial.get('paddle_api_max_concurrency')} "
         f"elapsed={trial.get('total_elapsed_seconds')} "
-        f"pages_per_second={trial.get('pages_per_second')} "
+        f"seconds_per_page={trial_seconds_per_page(trial)} "
         f"pdf_count={trial.get('pdf_count')} "
         f"page_count={trial.get('page_count')}",
         flush=True,
@@ -598,9 +626,9 @@ def best_trials_by_engine(trials: list[dict[str, Any]]) -> dict[str, dict[str, A
             best[engine] = trial
             continue
         current_elapsed = current.get("total_elapsed_seconds")
-        current_pps = current.get("pages_per_second") or 0
-        trial_pps = trial.get("pages_per_second") or 0
-        if elapsed < current_elapsed or (elapsed == current_elapsed and trial_pps > current_pps):
+        current_spp = trial_seconds_per_page(current)
+        trial_spp = trial_seconds_per_page(trial)
+        if elapsed < current_elapsed or (elapsed == current_elapsed and trial_spp < current_spp):
             best[engine] = trial
     return best
 
@@ -618,7 +646,7 @@ def build_summary_rows(
             "concurrency",
             "total_elapsed_seconds",
             "page_count",
-            "pages_per_second",
+            "seconds_per_page",
             "pdf_count",
             "success_count",
             "failure_count",
@@ -640,7 +668,7 @@ def build_summary_rows(
                 best.get("concurrency"),
                 best.get("total_elapsed_seconds"),
                 best.get("page_count"),
-                best.get("pages_per_second"),
+                trial_seconds_per_page(best),
                 best.get("pdf_count"),
                 best.get("success_count"),
                 best.get("failure_count"),
@@ -689,7 +717,7 @@ def build_engine_rows(trials: list[dict[str, Any]], *, engine: str) -> list[list
             "boundary_failure",
             "total_elapsed_seconds",
             "page_count",
-            "pages_per_second",
+            "seconds_per_page",
             "pdf_count",
             "success_count",
             "failure_count",
@@ -713,7 +741,7 @@ def build_engine_rows(trials: list[dict[str, Any]], *, engine: str) -> list[list
                 trial.get("boundary_failure"),
                 trial.get("total_elapsed_seconds"),
                 trial.get("page_count"),
-                trial.get("pages_per_second"),
+                trial_seconds_per_page(trial),
                 trial.get("pdf_count"),
                 trial.get("success_count"),
                 trial.get("failure_count"),

@@ -19,6 +19,11 @@ ENABLE_PAGE_SCREENSHOTS = os.environ.get("ENABLE_PAGE_SCREENSHOTS", "false").str
     "on",
 }
 PAGE_SCREENSHOT_DPI = int(os.environ.get("PAGE_SCREENSHOT_DPI", "144"))
+FIELD_KEYWORDS = [
+    item.strip()
+    for item in os.environ.get("FIELD_KEYWORDS", "").replace("，", ",").replace("；", ",").split(",")
+    if item.strip()
+]
 DEFAULT_INPUT_DIR = WORKSPACE / "input"
 if not DEFAULT_INPUT_DIR.exists():
     DEFAULT_INPUT_DIR = WORKSPACE / "data" / "input"
@@ -45,6 +50,7 @@ report = extract_pdf_dir(
     resume=False,
     enable_page_screenshots=ENABLE_PAGE_SCREENSHOTS,
     page_screenshot_dpi=PAGE_SCREENSHOT_DPI,
+    field_keywords=FIELD_KEYWORDS,
     paddle_operator_max_inflight=None,
     ocr_operator_max_inflight=None,
 )
@@ -56,10 +62,12 @@ print("failure_count:", report.failure_count)
 print("skipped_count:", report.skipped_count)
 print("pdf_count:", report.pdf_count)
 print("page_count:", report.page_count)
-print("pages_per_second:", report.pages_per_second)
+print("seconds_per_page:", report.seconds_per_page)
+print("field_match_count:", report.field_match_count)
 print("total_elapsed_seconds:", report.total_elapsed_seconds)
 print("engine:", report.engine)
 print("table_engine:", report.table_engine)
 print("concurrency:", report.concurrency)
 print("mineru_extra_args:", report.mineru_extra_args)
 print("enable_page_screenshots:", report.enable_page_screenshots)
+print("field_keywords:", FIELD_KEYWORDS)

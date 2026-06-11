@@ -8,7 +8,7 @@
   - `MINERU_API_MAX_CONCURRENT_REQUESTS`: MinerU API 服务端最大并发
   - `PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS`: Paddle Table API 服务端最大并发，仅 Paddle 模式测试
 
-脚本会在每个 API 服务端并发值变化时重启 Docker 服务并等待健康检查通过。服务启动和预热时间不会计入结果，最终以每次 `batch_report.json` 里的 `total_elapsed_seconds`、`page_count`、`pages_per_second` 为准。
+脚本会在每个 API 服务端并发值变化时重启 Docker 服务并等待健康检查通过。服务启动和预热时间不会计入结果，最终以每次 `batch_report.json` 里的 `total_elapsed_seconds`、`page_count`、`seconds_per_page` 为准。
 
 ## 基础运行
 
@@ -97,7 +97,7 @@ Excel 包含三个 sheet：
 - `concurrency`: 调用方批处理并发
 - `total_elapsed_seconds`: 该批 PDF 总耗时，来自 `batch_report.json`
 - `page_count`: 成功处理总页数，来自 `batch_report.json`
-- `pages_per_second`: 每秒处理页数，来自 `batch_report.json`
+- `seconds_per_page`: 平均每页耗时，单位是秒/页，来自 `batch_report.json`
 - `failure_count`: 失败 PDF 数
 - `error`: 失败原因摘要
 

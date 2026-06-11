@@ -58,11 +58,18 @@ def main() -> None:
         default=int(os.environ.get("PAGE_SCREENSHOT_DPI", "144")),
         help="DPI for --enable-page-screenshots.",
     )
+    parser.add_argument(
+        "--field-keywords",
+        action="append",
+        default=None,
+        help="Comma-separated or repeated keywords to locate in Paddle table cells and annotate in a PDF.",
+    )
     args = parser.parse_args()
 
     input_path = _resolve_input_path(args.input, args.input_dir)
     output_dir = _resolve_output_dir(args.output_dir)
     table_engine = "paddle" if args.use_paddle_tables else args.table_engine
+    field_keywords = _parse_field_keywords(args.field_keywords)
 
     if input_path.is_file():
         result = extract_pdf_file(
@@ -72,6 +79,7 @@ def main() -> None:
             overwrite=True,
             enable_page_screenshots=args.enable_page_screenshots,
             page_screenshot_dpi=args.page_screenshot_dpi,
+            field_keywords=field_keywords,
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2), flush=True)
         if result.success:
@@ -92,6 +100,7 @@ def main() -> None:
         resume=not args.overwrite,
         enable_page_screenshots=args.enable_page_screenshots,
         page_screenshot_dpi=args.page_screenshot_dpi,
+        field_keywords=field_keywords,
     )
     print(f"MINERU_BATCH_REPORT={report.batch_report_path}", flush=True)
     print(f"MINERU_BATCH_CSV={report.batch_report_csv_path}", flush=True)
@@ -103,7 +112,8 @@ def main() -> None:
                 "skipped_count": report.skipped_count,
                 "pdf_count": report.pdf_count,
                 "page_count": report.page_count,
-                "pages_per_second": report.pages_per_second,
+                "seconds_per_page": report.seconds_per_page,
+                "field_match_count": report.field_match_count,
                 "engine": report.engine,
                 "output_dir": report.output_dir,
             },
@@ -121,6 +131,25 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_field_keywords(raw_values: list[str] | None) -> list[str]:
+    values = list(raw_values or [])
+    env_value = os.environ.get("FIELD_KEYWORDS")
+    if env_value:
+        values.append(env_value)
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for part in value.replace("，", ",").replace("；", ",").replace(";", ",").split(","):
+            keyword = part.strip()
+            if not keyword:
+                continue
+            dedupe_key = "".join(keyword.split()).casefold()
+            if dedupe_key not in seen:
+                keywords.append(keyword)
+                seen.add(dedupe_key)
+    return keywords
 
 
 def _resolve_input_path(raw_input: str | None, raw_input_dir: str | None) -> Path:

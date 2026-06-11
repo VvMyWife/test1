@@ -176,6 +176,90 @@ def test_extract_pdf_file_persists_json_and_metrics(tmp_path: Path) -> None:
     assert '"parsed_pdf"' not in payload
 
 
+def test_extract_pdf_file_can_export_field_coordinates_and_annotation_pdf(
+    tmp_path: Path,
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    pdf_path = tmp_path / "input" / "demo.pdf"
+    pdf_path.parent.mkdir()
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    artifact = ArtifactRef(kind="middle_json", uri="/tmp/doc_middle.json")
+
+    def _fake_annotation(input_pdf_path, output_pdf_path, *, matches, parsed_pdf):  # noqa: ANN001
+        del input_pdf_path, parsed_pdf
+        output_pdf_path.write_bytes(b"%PDF-1.4\n")
+        for match in matches:
+            match["pdf_bounding_box"] = {"x": 10.0, "y": 20.0, "w": 30.0, "h": 12.0}
+            match["pdf_quad_points"] = [
+                {"x": 10.0, "y": 20.0},
+                {"x": 40.0, "y": 20.0},
+                {"x": 40.0, "y": 32.0},
+                {"x": 10.0, "y": 32.0},
+            ]
+
+    monkeypatch.setattr(pdf_extract_module, "_write_field_annotation_pdf", _fake_annotation)
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text="身份证号 123456",
+                table_blocks=[
+                    TableBlock(
+                        table_id="p0-t0",
+                        page_index=0,
+                        provider="paddleocr_ppstructurev3",
+                        coord_space="mineru_layout",
+                        cells=[
+                            TableCell(
+                                cell_id="p0-t0-c0",
+                                text="身份证号",
+                                bounding_box=BoundingBox(x=100, y=120, w=80, h=24),
+                                row_index=0,
+                                col_index=0,
+                            )
+                        ],
+                    )
+                ],
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "width": 600,
+                    "height": 800,
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    result = extract_pdf_file(
+        pdf_path,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+        table_engine="paddle",
+        field_keywords=["身份证号"],
+    )
+
+    assert result.success is True
+    assert result.field_match_count == 1
+    assert result.field_coordinates_path is not None
+    assert result.field_annotation_pdf_path is not None
+    assert Path(result.field_coordinates_path).exists()
+    assert Path(result.field_annotation_pdf_path).exists()
+    coordinates = json.loads(Path(result.field_coordinates_path).read_text(encoding="utf-8"))
+    assert coordinates["field_keywords"] == ["身份证号"]
+    assert coordinates["match_count"] == 1
+    assert coordinates["matches"][0]["bounding_box"] == {"x": 100.0, "y": 120.0, "w": 80.0, "h": 24.0}
+    assert coordinates["matches"][0]["quad_points"][2] == {"x": 180.0, "y": 144.0}
+    payload = json.loads(Path(result.json_path or "").read_text(encoding="utf-8"))
+    artifact_kinds = {artifact["kind"] for artifact in payload["artifacts"]}
+    assert "field_coordinates_json" in artifact_kinds
+    assert "field_annotation_pdf" in artifact_kinds
+
+
 def test_extract_pdf_file_accepts_image_and_converts_to_pdf(tmp_path: Path) -> None:
     from PIL import Image
 
@@ -451,11 +535,12 @@ def test_extract_pdf_dir_writes_batch_reports_and_skips_existing_json(tmp_path: 
     assert first.success_count == 1
     assert first.failure_count == 0
     assert first.page_count == 1
-    assert first.pages_per_second > 0
+    assert first.seconds_per_page > 0
     assert Path(first.batch_report_path).exists()
     assert Path(first.batch_report_csv_path).exists()
     assert first_report["page_count"] == 1
-    assert first_report["pages_per_second"] == first.pages_per_second
+    assert first_report["seconds_per_page"] == first.seconds_per_page
+    assert "pages_per_second" not in first_report
     assert second.skipped_count == 1
     assert second.items[0].skipped is True
     assert second.page_count == 1

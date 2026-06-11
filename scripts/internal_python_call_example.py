@@ -26,12 +26,15 @@ def extract_one_pdf() -> PdfFileExtractResult:
         output_dir=SINGLE_OUTPUT_DIR,
         table_engine="paddle",
         overwrite=True,
+        field_keywords=["身份证号"],
     )
 
     print("single.success:", result.success)
     print("single.json_path:", result.json_path)
     print("single.error_report:", result.error_report)
     print("single.table_cell_count:", result.table_cell_count)
+    print("single.field_coordinates_path:", result.field_coordinates_path)
+    print("single.field_annotation_pdf_path:", result.field_annotation_pdf_path)
     return result
 
 
@@ -53,7 +56,7 @@ def extract_pdf_folder() -> PdfDirExtractReport:
     print("batch.failure_count:", report.failure_count)
     print("batch.pdf_count:", report.pdf_count)
     print("batch.page_count:", report.page_count)
-    print("batch.pages_per_second:", report.pages_per_second)
+    print("batch.seconds_per_page:", report.seconds_per_page)
     print("batch.engine:", report.engine)
     print("batch.output_dir:", report.output_dir)
     return report

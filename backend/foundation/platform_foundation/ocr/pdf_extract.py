@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..contracts import ArtifactRef
+from ..contracts import ArtifactRef, BoundingBox
 from ..operators import LayoutExtractMinerUOperator, LayoutExtractMinerUPaddleTableOperator
 from .pure_mineru import (
     DEFAULT_MINERU_API_URL,
@@ -70,6 +70,10 @@ class PdfFileExtractResult(BaseModel):
     input_type: str = "pdf"
     converted_pdf_path: str | None = None
     page_screenshots_manifest: str | None = None
+    field_keywords: list[str] = Field(default_factory=list)
+    field_match_count: int = Field(default=0, ge=0)
+    field_coordinates_path: str | None = None
+    field_annotation_pdf_path: str | None = None
     relative_input_path: str | None = None
     output_relative_dir: str | None = None
 
@@ -94,7 +98,8 @@ class PdfDirExtractReport(BaseModel):
     paddle_table_mode: str | None = None
     paddle_device: str | None = None
     page_count: int = Field(default=0, ge=0)
-    pages_per_second: float = Field(default=0.0, ge=0)
+    seconds_per_page: float = Field(default=0.0, ge=0)
+    field_match_count: int = Field(default=0, ge=0)
     success_count: int = Field(ge=0)
     failure_count: int = Field(ge=0)
     skipped_count: int = Field(default=0, ge=0)
@@ -154,6 +159,7 @@ class MinerUPdfFileOperator:
         overwrite: bool = True,
         enable_page_screenshots: bool = False,
         page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI,
+        field_keywords: Sequence[str] | str | None = None,
         queue_wait_seconds: float = 0.0,
         extra_args: Sequence[str] | None = None,
         mineru_options: dict[str, Any] | None = None,
@@ -185,6 +191,10 @@ class MinerUPdfFileOperator:
         input_type = "pdf"
         converted_pdf_path: Path | None = None
         page_screenshots_manifest: str | None = None
+        resolved_field_keywords = _normalize_field_keywords(field_keywords)
+        field_coordinates_path: str | None = None
+        field_annotation_pdf_path: str | None = None
+        field_match_count = 0
         try:
             self._validate_input_path(resolved_input)
             pdf_for_mineru = resolved_input
@@ -251,6 +261,20 @@ class MinerUPdfFileOperator:
                 )
                 artifacts.append(screenshot_artifact)
                 page_screenshots_manifest = screenshot_artifact.uri
+            if resolved_field_keywords:
+                field_artifacts = _write_field_coordinate_artifacts(
+                    parsed,
+                    keywords=resolved_field_keywords,
+                    source_pdf_path=resolved_input,
+                    annotation_pdf_path=pdf_for_mineru,
+                    output_dir=artifact_dir,
+                    output_stem=output_stem,
+                    table_engine=resolved_table_engine,
+                )
+                artifacts.extend(field_artifacts["artifacts"])
+                field_coordinates_path = field_artifacts["coordinates_path"]
+                field_annotation_pdf_path = field_artifacts["annotation_pdf_path"]
+                field_match_count = int(field_artifacts["match_count"])
 
             parsed = parsed.model_copy(
                 update={
@@ -290,6 +314,10 @@ class MinerUPdfFileOperator:
                 input_type=input_type,
                 converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
                 page_screenshots_manifest=page_screenshots_manifest,
+                field_keywords=resolved_field_keywords,
+                field_match_count=field_match_count,
+                field_coordinates_path=field_coordinates_path,
+                field_annotation_pdf_path=field_annotation_pdf_path,
             )
         except Exception as exc:
             processing_seconds = time.perf_counter() - started
@@ -317,6 +345,10 @@ class MinerUPdfFileOperator:
                 input_type=input_type,
                 converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
                 page_screenshots_manifest=page_screenshots_manifest,
+                field_keywords=resolved_field_keywords,
+                field_match_count=field_match_count,
+                field_coordinates_path=field_coordinates_path,
+                field_annotation_pdf_path=field_annotation_pdf_path,
             )
             error_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
             return result
@@ -404,6 +436,7 @@ class MinerUPdfDirBatchOperator:
         overwrite: bool = False,
         enable_page_screenshots: bool = False,
         page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI,
+        field_keywords: Sequence[str] | str | None = None,
         paddle_table_mode: str = "ppstructurev3",
         paddle_device: str | None = None,
         engine: str = "auto",
@@ -428,6 +461,7 @@ class MinerUPdfDirBatchOperator:
             table_engine=table_engine,
         )
         selected_engine = _resolve_batch_engine(engine=engine, concurrency=concurrency)
+        resolved_field_keywords = _normalize_field_keywords(field_keywords)
         tasks = [
             self._build_task(
                 pdf,
@@ -440,6 +474,7 @@ class MinerUPdfDirBatchOperator:
                 overwrite=overwrite,
                 enable_page_screenshots=enable_page_screenshots,
                 page_screenshot_dpi=page_screenshot_dpi,
+                field_keywords=resolved_field_keywords,
             )
             for pdf in pdfs
         ]
@@ -477,6 +512,7 @@ class MinerUPdfDirBatchOperator:
         overwrite: bool,
         enable_page_screenshots: bool,
         page_screenshot_dpi: int,
+        field_keywords: Sequence[str],
     ) -> "_BatchTask":
         task_output_dir, output_relative_dir = _output_dir_for_input_file(
             pdf,
@@ -496,6 +532,7 @@ class MinerUPdfDirBatchOperator:
             overwrite=overwrite,
             enable_page_screenshots=enable_page_screenshots,
             page_screenshot_dpi=page_screenshot_dpi,
+            field_keywords=list(field_keywords),
         )
 
     def _run_task(
@@ -513,6 +550,7 @@ class MinerUPdfDirBatchOperator:
                 table_engine=task.table_engine,
                 paddle_table_mode=task.paddle_table_mode,
                 file_operator=self.file_operator,
+                field_keywords=task.field_keywords,
                 relative_input_path=task.relative_input_path,
                 output_relative_dir=task.output_relative_dir,
             )
@@ -536,6 +574,7 @@ class MinerUPdfDirBatchOperator:
                 overwrite=True,
                 enable_page_screenshots=task.enable_page_screenshots,
                 page_screenshot_dpi=task.page_screenshot_dpi,
+                field_keywords=task.field_keywords,
                 queue_wait_seconds=queue_wait_seconds,
             )
             return result.model_copy(
@@ -585,6 +624,9 @@ class MinerUPdfDirBatchOperator:
                 "paddle_device": [task.paddle_device or "" for task in tasks],
                 "enable_page_screenshots": [task.enable_page_screenshots for task in tasks],
                 "page_screenshot_dpi": [task.page_screenshot_dpi for task in tasks],
+                "field_keywords_json": [
+                    json.dumps(task.field_keywords, ensure_ascii=False) for task in tasks
+                ],
                 "resume": [task.resume for task in tasks],
                 "overwrite": [task.overwrite for task in tasks],
                 "api_url": [self.file_operator.api_url for _ in tasks],
@@ -620,6 +662,7 @@ class MinerUPdfDirBatchOperator:
                 daft.col("paddle_device"),
                 daft.col("enable_page_screenshots"),
                 daft.col("page_screenshot_dpi"),
+                daft.col("field_keywords_json"),
                 daft.col("resume"),
                 daft.col("overwrite"),
                 daft.col("api_url"),
@@ -669,7 +712,7 @@ class MinerUPdfDirBatchOperator:
         _write_batch_csv(batch_report_csv_path, items)
         total_elapsed_seconds = round(time.perf_counter() - started_at, 3)
         page_count = sum(item.page_count for item in items if item.success)
-        pages_per_second = round(page_count / total_elapsed_seconds, 3) if total_elapsed_seconds > 0 else 0.0
+        seconds_per_page = round(total_elapsed_seconds / page_count, 3) if page_count > 0 else 0.0
         report = PdfDirExtractReport(
             engine=engine,
             input=str(input_root),
@@ -686,7 +729,8 @@ class MinerUPdfDirBatchOperator:
             paddle_table_mode=paddle_table_mode if table_engine == "paddle" else None,
             paddle_device=paddle_device,
             page_count=page_count,
-            pages_per_second=pages_per_second,
+            seconds_per_page=seconds_per_page,
+            field_match_count=sum(item.field_match_count for item in items if item.success),
             success_count=sum(1 for item in items if item.success),
             failure_count=len(failed_items),
             skipped_count=sum(1 for item in items if item.skipped),
@@ -715,6 +759,7 @@ class _BatchTask(BaseModel):
     paddle_device: str | None
     enable_page_screenshots: bool = False
     page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI
+    field_keywords: list[str] = Field(default_factory=list)
     resume: bool
     overwrite: bool
 
@@ -790,6 +835,7 @@ def _extract_file_for_daft(
     paddle_device: str,
     enable_page_screenshots: bool,
     page_screenshot_dpi: int,
+    field_keywords_json: str,
     resume: bool,
     overwrite: bool,
     api_url: str,
@@ -829,6 +875,7 @@ def _extract_file_for_daft(
         paddle_device=paddle_device or None,
         enable_page_screenshots=bool(enable_page_screenshots),
         page_screenshot_dpi=int(page_screenshot_dpi),
+        field_keywords=_load_field_keywords_json(field_keywords_json),
         resume=resume,
         overwrite=overwrite,
     )
@@ -849,6 +896,7 @@ def _build_daft_udf(daft: Any, max_concurrency: int) -> Any:
         paddle_device: str,
         enable_page_screenshots: bool,
         page_screenshot_dpi: int,
+        field_keywords_json: str,
         resume: bool,
         overwrite: bool,
         api_url: str,
@@ -876,6 +924,7 @@ def _build_daft_udf(daft: Any, max_concurrency: int) -> Any:
             paddle_device,
             enable_page_screenshots,
             page_screenshot_dpi,
+            field_keywords_json,
             resume,
             overwrite,
             api_url,
@@ -924,6 +973,7 @@ def _result_from_existing_json(
     table_engine: str,
     paddle_table_mode: str,
     file_operator: MinerUPdfFileOperator,
+    field_keywords: Sequence[str] | None = None,
     relative_input_path: str | None = None,
     output_relative_dir: str | None = None,
 ) -> PdfFileExtractResult | None:
@@ -950,6 +1000,20 @@ def _result_from_existing_json(
     artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
     converted_pdf_path = _artifact_uri(artifacts, "converted_pdf")
     page_screenshots_manifest = _artifact_uri(artifacts, "page_screenshots_manifest")
+    field_coordinates_path = _artifact_uri(artifacts, "field_coordinates_json")
+    field_annotation_pdf_path = _artifact_uri(artifacts, "field_annotation_pdf")
+    resolved_field_keywords = _normalize_field_keywords(field_keywords)
+    field_summary = _read_field_coordinate_summary(field_coordinates_path)
+    if resolved_field_keywords:
+        existing_keywords = _normalize_field_keywords(field_summary.get("field_keywords"))
+        if (
+            existing_keywords != resolved_field_keywords
+            or not field_coordinates_path
+            or not Path(field_coordinates_path).exists()
+            or not field_annotation_pdf_path
+            or not Path(field_annotation_pdf_path).exists()
+        ):
+            return None
     return PdfFileExtractResult(
         pdf_path=str(pdf_path),
         source_file_name=source_file_name,
@@ -975,6 +1039,10 @@ def _result_from_existing_json(
         input_type="image" if _is_image_file(pdf_path) else "pdf",
         converted_pdf_path=converted_pdf_path,
         page_screenshots_manifest=page_screenshots_manifest,
+        field_keywords=resolved_field_keywords,
+        field_match_count=int(field_summary.get("match_count") or 0),
+        field_coordinates_path=field_coordinates_path,
+        field_annotation_pdf_path=field_annotation_pdf_path,
         relative_input_path=relative_input_path,
         output_relative_dir=output_relative_dir,
     )
@@ -1087,6 +1155,299 @@ def _convert_image_to_pdf(image_path: Path, output_pdf_path: Path) -> None:
         elif converted.mode != "RGB":
             converted = converted.convert("RGB")
         converted.save(output_pdf_path, "PDF", resolution=300.0)
+
+
+def _write_field_coordinate_artifacts(
+    result: Any,
+    *,
+    keywords: Sequence[str],
+    source_pdf_path: Path,
+    annotation_pdf_path: Path,
+    output_dir: Path,
+    output_stem: str,
+    table_engine: str,
+) -> dict[str, Any]:
+    resolved_keywords = _normalize_field_keywords(keywords)
+    matches = _extract_field_coordinate_matches(result, resolved_keywords)
+    coordinates_path = output_dir / f"{output_stem}.field_coordinates.json"
+    annotated_pdf_path = output_dir / f"{output_stem}.field_annotations.pdf"
+    _write_field_annotation_pdf(
+        annotation_pdf_path,
+        annotated_pdf_path,
+        matches=matches,
+        parsed_pdf=result.parsed_pdf,
+    )
+    payload = {
+        "source_pdf": str(source_pdf_path),
+        "annotation_pdf_source": str(annotation_pdf_path),
+        "annotated_pdf": str(annotated_pdf_path),
+        "table_engine": table_engine,
+        "coord_space": str(getattr(result, "coord_space", "mineru_layout")),
+        "field_keywords": list(resolved_keywords),
+        "match_count": len(matches),
+        "matches": matches,
+    }
+    coordinates_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "coordinates_path": str(coordinates_path),
+        "annotation_pdf_path": str(annotated_pdf_path),
+        "match_count": len(matches),
+        "artifacts": [
+            ArtifactRef(
+                kind="field_coordinates_json",
+                uri=str(coordinates_path),
+                meta={
+                    "field_keywords": list(resolved_keywords),
+                    "match_count": len(matches),
+                    "content_type": "application/json",
+                },
+            ),
+            ArtifactRef(
+                kind="field_annotation_pdf",
+                uri=str(annotated_pdf_path),
+                meta={
+                    "field_keywords": list(resolved_keywords),
+                    "match_count": len(matches),
+                    "content_type": "application/pdf",
+                },
+            ),
+        ],
+    }
+
+
+def _extract_field_coordinate_matches(result: Any, keywords: Sequence[str]) -> list[dict[str, Any]]:
+    normalized_keywords = [(keyword, _normalize_match_text(keyword)) for keyword in keywords]
+    if not normalized_keywords:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    parsed_pdf = getattr(result, "parsed_pdf", None)
+    pages = getattr(parsed_pdf, "pages", []) if parsed_pdf is not None else []
+    for page in pages:
+        page_index = int(getattr(page, "page_index", 0))
+        for table in getattr(page, "table_blocks", []) or []:
+            for cell in getattr(table, "cells", []) or []:
+                text = str(getattr(cell, "text", "") or "")
+                normalized_text = _normalize_match_text(text)
+                if not normalized_text:
+                    continue
+                bounding_box = getattr(cell, "bounding_box", None)
+                if bounding_box is None:
+                    continue
+                for keyword, normalized_keyword in normalized_keywords:
+                    if normalized_keyword and normalized_keyword in normalized_text:
+                        matches.append(
+                            _build_field_match(
+                                keyword=keyword,
+                                text=text,
+                                page=page,
+                                table=table,
+                                cell=cell,
+                                bounding_box=bounding_box,
+                            )
+                        )
+
+    matches.sort(
+        key=lambda item: (
+            int(item["page_index"]),
+            float(item["bounding_box"]["y"]),
+            float(item["bounding_box"]["x"]),
+            str(item["keyword"]),
+        )
+    )
+    return matches
+
+
+def _build_field_match(
+    *,
+    keyword: str,
+    text: str,
+    page: Any,
+    table: Any,
+    cell: Any,
+    bounding_box: BoundingBox,
+) -> dict[str, Any]:
+    box = _bbox_to_dict(bounding_box)
+    return {
+        "keyword": keyword,
+        "text": text,
+        "page_index": int(getattr(page, "page_index", 0)),
+        "page_number": int(getattr(page, "page_index", 0)) + 1,
+        "source": "table_cell",
+        "table_id": getattr(table, "table_id", None),
+        "cell_id": getattr(cell, "cell_id", None),
+        "row_index": getattr(cell, "row_index", None),
+        "col_index": getattr(cell, "col_index", None),
+        "row_span": getattr(cell, "row_span", None),
+        "col_span": getattr(cell, "col_span", None),
+        "confidence": getattr(cell, "confidence", None),
+        "coord_space": getattr(table, "coord_space", "mineru_layout"),
+        "bounding_box": box,
+        "quad_points": _bbox_quad_points(box),
+        "pdf_bounding_box": None,
+        "pdf_quad_points": None,
+        "meta": {
+            "table_provider": getattr(table, "provider", None),
+            "cell_meta": getattr(cell, "meta", {}),
+        },
+    }
+
+
+def _write_field_annotation_pdf(
+    input_pdf_path: Path,
+    output_pdf_path: Path,
+    *,
+    matches: list[dict[str, Any]],
+    parsed_pdf: Any,
+) -> None:
+    try:
+        import fitz  # PyMuPDF
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PyMuPDF is required to write field annotation PDFs") from exc
+
+    output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    with fitz.open(str(input_pdf_path)) as doc:
+        pages_by_index = {
+            int(getattr(page, "page_index", 0)): page
+            for page in (getattr(parsed_pdf, "pages", []) or [])
+        }
+        for match in matches:
+            page_index = int(match["page_index"])
+            if page_index < 0 or page_index >= len(doc):
+                continue
+            pdf_page = doc[page_index]
+            rect = _match_pdf_rect(match, pages_by_index.get(page_index), pdf_page.rect)
+            if rect is None:
+                continue
+            match["pdf_bounding_box"] = _pdf_rect_to_dict(rect)
+            match["pdf_quad_points"] = _bbox_quad_points(match["pdf_bounding_box"])
+            expanded = fitz.Rect(rect.x0 - 1.5, rect.y0 - 1.5, rect.x1 + 1.5, rect.y1 + 1.5)
+            expanded &= pdf_page.rect
+            pdf_page.draw_rect(
+                expanded,
+                color=(1, 0, 0),
+                fill=(1, 1, 0),
+                fill_opacity=0.18,
+                width=1.4,
+                overlay=True,
+            )
+        doc.save(str(output_pdf_path), garbage=4, deflate=True)
+
+
+def _match_pdf_rect(match: dict[str, Any], page: Any, page_rect: Any) -> Any:
+    try:
+        import fitz
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PyMuPDF is required to convert field coordinates to PDF points") from exc
+
+    box = match.get("bounding_box")
+    if not isinstance(box, dict):
+        return None
+    source_width, source_height = _page_coordinate_size(page)
+    if not source_width or not source_height:
+        source_width = float(page_rect.width)
+        source_height = float(page_rect.height)
+    if source_width <= 0 or source_height <= 0:
+        return None
+    scale_x = float(page_rect.width) / source_width
+    scale_y = float(page_rect.height) / source_height
+    x0 = float(box["x"]) * scale_x
+    y0 = float(box["y"]) * scale_y
+    x1 = float(box["x"] + box["w"]) * scale_x
+    y1 = float(box["y"] + box["h"]) * scale_y
+    rect = fitz.Rect(x0, y0, x1, y1)
+    return rect & page_rect
+
+
+def _page_coordinate_size(page: Any) -> tuple[float | None, float | None]:
+    image_size = getattr(page, "image_size", None)
+    if image_size is not None:
+        width = getattr(image_size, "width", None)
+        height = getattr(image_size, "height", None)
+        if width and height:
+            return float(width), float(height)
+    return None, None
+
+
+def _bbox_to_dict(box: BoundingBox) -> dict[str, float]:
+    return {
+        "x": float(box.x),
+        "y": float(box.y),
+        "w": float(box.w),
+        "h": float(box.h),
+    }
+
+
+def _pdf_rect_to_dict(rect: Any) -> dict[str, float]:
+    return {
+        "x": round(float(rect.x0), 3),
+        "y": round(float(rect.y0), 3),
+        "w": round(float(rect.width), 3),
+        "h": round(float(rect.height), 3),
+        "x0": round(float(rect.x0), 3),
+        "y0": round(float(rect.y0), 3),
+        "x1": round(float(rect.x1), 3),
+        "y1": round(float(rect.y1), 3),
+    }
+
+
+def _bbox_quad_points(box: dict[str, float]) -> list[dict[str, float]]:
+    x = float(box["x"])
+    y = float(box["y"])
+    w = float(box["w"])
+    h = float(box["h"])
+    return [
+        {"x": round(x, 3), "y": round(y, 3)},
+        {"x": round(x + w, 3), "y": round(y, 3)},
+        {"x": round(x + w, 3), "y": round(y + h, 3)},
+        {"x": round(x, 3), "y": round(y + h, 3)},
+    ]
+
+
+def _normalize_field_keywords(value: Sequence[str] | str | None) -> list[str]:
+    if value is None:
+        return []
+    raw_items: list[str]
+    if isinstance(value, str):
+        raw_items = [value]
+    else:
+        raw_items = [str(item) for item in value]
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        for part in re.split(r"[,，;；\n\r\t]+", item):
+            keyword = part.strip()
+            if not keyword:
+                continue
+            key = _normalize_match_text(keyword)
+            if key and key not in seen:
+                keywords.append(keyword)
+                seen.add(key)
+    return keywords
+
+
+def _normalize_match_text(value: str) -> str:
+    return re.sub(r"\s+", "", value).casefold()
+
+
+def _load_field_keywords_json(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return _normalize_field_keywords(value)
+    return _normalize_field_keywords(payload)
+
+
+def _read_field_coordinate_summary(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _flatten_mineru_output_dir(result: Any, *, artifact_dir: Path, mineru_pdf_path: Path) -> Any:
@@ -1274,6 +1635,10 @@ def _write_batch_csv(path: Path, items: list[PdfFileExtractResult]) -> None:
         "output_relative_dir",
         "converted_pdf_path",
         "page_screenshots_manifest",
+        "field_keywords",
+        "field_match_count",
+        "field_coordinates_path",
+        "field_annotation_pdf_path",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
