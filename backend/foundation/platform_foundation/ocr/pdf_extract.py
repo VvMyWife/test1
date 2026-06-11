@@ -1029,13 +1029,18 @@ def _output_dir_for_input_file(
         relative_parent = input_path.relative_to(input_root).parent
     except ValueError:
         relative_parent = Path()
+    output_stem = _safe_stem(input_path.name)
 
     if relative_parent == Path("."):
         if input_root.name.strip().lower() in GENERIC_FLAT_INPUT_DIR_NAMES:
             return output_root, None
+        if _safe_path_part(input_root.name) == output_stem:
+            return output_root, None
         output_relative_dir = Path(_safe_path_part(input_root.name))
     else:
         output_relative_dir = _safe_relative_dir(relative_parent)
+        if output_relative_dir.name == output_stem:
+            output_relative_dir = output_relative_dir.parent
 
     if not output_relative_dir.parts:
         return output_root, None

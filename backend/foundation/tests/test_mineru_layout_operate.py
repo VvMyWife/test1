@@ -584,3 +584,43 @@ def test_extract_pdf_dir_preserves_direct_business_folder_name(tmp_path: Path) -
     assert item.output_relative_dir == "3-WS-001"
     assert Path(item.artifact_dir) == tmp_path / "output" / "3-WS-001" / "0190"
     assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0190" / "0190.json"
+
+
+def test_extract_pdf_dir_collapses_duplicate_parent_and_file_stem(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    duplicate_dir = input_dir / "1"
+    duplicate_dir.mkdir(parents=True)
+    (duplicate_dir / "1.pdf").write_bytes(b"%PDF-1.4\n")
+    artifact = ArtifactRef(kind="middle_json", uri="/tmp/doc_middle.json")
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text=Path(document["file_uri"]).name,
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    report = extract_pdf_dir(
+        input_dir,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+        concurrency=1,
+        recursive=True,
+        overwrite=True,
+    )
+
+    item = report.items[0]
+    assert item.relative_input_path == "1/1.pdf"
+    assert item.output_relative_dir is None
+    assert Path(item.artifact_dir) == tmp_path / "output" / "1"
+    assert Path(item.json_path or "") == tmp_path / "output" / "1" / "1.json"
