@@ -25,6 +25,13 @@ CATEGORY_ALIASES = {
     "印刷体": "印刷体文档",
     "印刷体文档": "印刷体文档",
 }
+COMPARE_PRESETS = {
+    "md": ["*.md"],
+    "content-v2": ["*_content_list_v2.json"],
+    "middle": ["*_middle.json"],
+    "json": ["*.json"],
+    "all": ["*.md", "*_content_list_v2.json", "*_middle.json"],
+}
 XLSX_NS = {
     "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -53,7 +60,8 @@ class CheckResult:
     passed: bool
     status: str
     reason: str
-    md_paths: str
+    source_paths: str
+    source_count: int
     match_position: int | None
 
 
@@ -76,10 +84,11 @@ def main() -> int:
             "No test points found. Expected columns like 文件夹, 文件名, 测试点1, 测试点2..."
         )
 
-    md_index = build_md_index(ocr_dir)
+    compare_patterns = resolve_compare_patterns(args.compare_preset, args.compare_glob)
+    source_index = build_source_index(ocr_dir, compare_patterns)
     results = check_test_points(
         test_points,
-        md_index=md_index,
+        source_index=source_index,
         ignore_punctuation=args.ignore_punctuation,
     )
     summary = build_summary(results)
@@ -94,6 +103,7 @@ def main() -> int:
         report_json,
         xlsx_path=xlsx_path,
         ocr_dir=ocr_dir,
+        compare_patterns=compare_patterns,
         results=results,
         summary=summary,
     )
@@ -101,11 +111,13 @@ def main() -> int:
         report_md,
         xlsx_path=xlsx_path,
         ocr_dir=ocr_dir,
+        compare_patterns=compare_patterns,
         results=results,
         summary=summary,
     )
 
     print_summary(summary)
+    print(f"COMPARE_PATTERNS={','.join(compare_patterns)}")
     print(f"DETAIL_CSV={detail_csv}")
     print(f"SUMMARY_CSV={summary_csv}")
     print(f"REPORT_JSON={report_json}")
@@ -119,13 +131,13 @@ def main() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Check whether each Excel test-point text appears completely in the matching OCR Markdown."
+            "Check whether each Excel test-point text appears completely in matching OCR output files."
         )
     )
     parser.add_argument(
         "--ocr-dir",
         default="output/ocr_first",
-        help="OCR output directory containing category folders and Markdown files.",
+        help="OCR output directory containing category folders and OCR output files.",
     )
     parser.add_argument(
         "--xlsx",
@@ -143,6 +155,24 @@ def parse_args() -> argparse.Namespace:
         help="Report output directory. Defaults to <ocr-dir>/test_point_check.",
     )
     parser.add_argument(
+        "--compare-preset",
+        default="md",
+        choices=sorted(COMPARE_PRESETS),
+        help=(
+            "Built-in source file preset: md, content-v2, middle, json, or all. "
+            "Ignored when --compare-glob is provided."
+        ),
+    )
+    parser.add_argument(
+        "--compare-glob",
+        action="append",
+        default=None,
+        help=(
+            "Source file glob under --ocr-dir. Can repeat or use commas, for example "
+            "'*.md' or '*_content_list_v2.json,*_middle.json'."
+        ),
+    )
+    parser.add_argument(
         "--ignore-punctuation",
         action="store_true",
         help="Ignore punctuation while matching. Whitespace is always ignored.",
@@ -153,6 +183,25 @@ def parse_args() -> argparse.Namespace:
         help="Exit with code 1 when any test point fails.",
     )
     return parser.parse_args()
+
+
+def resolve_compare_patterns(compare_preset: str, raw_globs: list[str] | None) -> list[str]:
+    raw_values = list(raw_globs or [])
+    if not raw_values:
+        return list(COMPARE_PRESETS[compare_preset])
+    patterns: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        for part in re.split(r"[,，;；\n\r\t]+", raw):
+            pattern = part.strip()
+            if not pattern:
+                continue
+            if pattern not in seen:
+                patterns.append(pattern)
+                seen.add(pattern)
+    if not patterns:
+        raise SystemExit("No valid --compare-glob pattern provided")
+    return patterns
 
 
 def find_default_xlsx(ocr_dir: Path) -> Path:
@@ -318,18 +367,25 @@ def get_cell(row: list[str], index: int) -> str:
     return row[index] if index < len(row) else ""
 
 
-def build_md_index(ocr_dir: Path) -> dict[tuple[str, str], list[Path]]:
+def build_source_index(ocr_dir: Path, compare_patterns: list[str]) -> dict[tuple[str, str], list[Path]]:
     index: dict[tuple[str, str], list[Path]] = {}
-    for md_path in sorted(ocr_dir.rglob("*.md")):
-        try:
-            relative = md_path.relative_to(ocr_dir)
-        except ValueError:
-            continue
-        category = detect_category(relative)
-        if not category:
-            continue
-        for doc_id in doc_id_candidates_from_path(relative):
-            index.setdefault((category, doc_id), []).append(md_path)
+    seen_paths: set[Path] = set()
+    for pattern in compare_patterns:
+        for source_path in sorted(ocr_dir.rglob(pattern)):
+            if source_path in seen_paths or not source_path.is_file():
+                continue
+            if "test_point_check" in source_path.parts:
+                continue
+            seen_paths.add(source_path)
+            try:
+                relative = source_path.relative_to(ocr_dir)
+            except ValueError:
+                continue
+            category = detect_category(relative)
+            if not category:
+                continue
+            for doc_id in doc_id_candidates_from_path(relative):
+                index.setdefault((category, doc_id), []).append(source_path)
     return index
 
 
@@ -361,8 +417,28 @@ def doc_id_candidates(value: str) -> set[str]:
     raw = normalize_file_name(value)
     if not raw:
         return set()
-    stripped = re.sub(r"(?i)(\.converted|_converted|-converted)$", "", raw)
-    stripped = re.sub(r"(?i)\.(pdf|jpg|jpeg|png|bmp|tif|tiff|md|json)$", "", stripped)
+    stripped = re.sub(r"(?i)\.(pdf|jpg|jpeg|png|bmp|tif|tiff|md|json)$", "", raw)
+    suffixes = (
+        "_content_list_v2",
+        "_content_list",
+        "_middle",
+        "_model",
+        "_origin",
+        "_layout",
+        "_span",
+        "_field_coordinates",
+        ".field_coordinates",
+        ".converted",
+        "_converted",
+        "-converted",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if stripped.lower().endswith(suffix.lower()):
+                stripped = stripped[: -len(suffix)]
+                changed = True
     candidates = {raw, stripped}
     if stripped.isdigit():
         candidates.add(str(int(stripped)))
@@ -381,35 +457,35 @@ def normalize_file_name(value: str) -> str:
 def check_test_points(
     test_points: list[TestPoint],
     *,
-    md_index: dict[tuple[str, str], list[Path]],
+    source_index: dict[tuple[str, str], list[Path]],
     ignore_punctuation: bool,
 ) -> list[CheckResult]:
-    md_cache: dict[Path, str] = {}
+    source_cache: dict[Path, str] = {}
     results: list[CheckResult] = []
     for point in test_points:
-        md_paths: list[Path] = []
+        source_paths: list[Path] = []
         for doc_id in doc_id_candidates(point.file_name):
-            md_paths.extend(md_index.get((point.category, doc_id), []))
-        md_paths = sorted(set(md_paths))
+            source_paths.extend(source_index.get((point.category, doc_id), []))
+        source_paths = sorted(set(source_paths))
         expected_normalized = normalize_for_match(
             point.expected_text,
             ignore_punctuation=ignore_punctuation,
         )
 
-        if not md_paths:
+        if not source_paths:
             results.append(
                 build_result(
                     point,
                     passed=False,
-                    reason="md_not_found",
-                    md_paths=[],
+                    reason="source_not_found",
+                    source_paths=[],
                     match_position=None,
                     expected_normalized=expected_normalized,
                 )
             )
             continue
 
-        combined = "\n".join(read_text_cached(path, md_cache) for path in md_paths)
+        combined = "\n".join(read_source_text_cached(path, source_cache) for path in source_paths)
         combined_normalized = normalize_for_match(
             combined,
             ignore_punctuation=ignore_punctuation,
@@ -421,7 +497,7 @@ def check_test_points(
                 point,
                 passed=passed,
                 reason="matched" if passed else "text_not_found",
-                md_paths=md_paths,
+                source_paths=source_paths,
                 match_position=match_position if passed else None,
                 expected_normalized=expected_normalized,
             )
@@ -429,10 +505,57 @@ def check_test_points(
     return results
 
 
-def read_text_cached(path: Path, cache: dict[Path, str]) -> str:
+def read_source_text_cached(path: Path, cache: dict[Path, str]) -> str:
     if path not in cache:
-        cache[path] = path.read_text(encoding="utf-8", errors="ignore")
+        raw_text = path.read_text(encoding="utf-8", errors="ignore")
+        if path.suffix.lower() == ".json":
+            cache[path] = extract_json_text(raw_text)
+        else:
+            cache[path] = raw_text
     return cache[path]
+
+
+def extract_json_text(raw_text: str) -> str:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return raw_text
+    strings: list[str] = []
+    collect_json_strings(payload, strings)
+    if not strings:
+        return raw_text
+    return "\n".join(strings)
+
+
+def collect_json_strings(value: object, output: list[str]) -> None:
+    if isinstance(value, str):
+        if value.strip():
+            output.append(value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            collect_json_strings(item, output)
+        return
+    if isinstance(value, dict):
+        preferred_keys = (
+            "text",
+            "content",
+            "html",
+            "markdown",
+            "md",
+            "line",
+            "span",
+            "value",
+            "rec_text",
+        )
+        emitted_keys: set[str] = set()
+        for key in preferred_keys:
+            if key in value:
+                collect_json_strings(value[key], output)
+                emitted_keys.add(key)
+        for key, item in value.items():
+            if key not in emitted_keys:
+                collect_json_strings(item, output)
 
 
 def normalize_for_match(value: str, *, ignore_punctuation: bool) -> str:
@@ -452,7 +575,7 @@ def build_result(
     *,
     passed: bool,
     reason: str,
-    md_paths: list[Path],
+    source_paths: list[Path],
     match_position: int | None,
     expected_normalized: str,
 ) -> CheckResult:
@@ -467,7 +590,8 @@ def build_result(
         passed=passed,
         status="正确" if passed else "错误",
         reason=reason,
-        md_paths=";".join(str(path) for path in md_paths),
+        source_paths=";".join(str(path) for path in source_paths),
+        source_count=len(source_paths),
         match_position=match_position,
     )
 
@@ -492,7 +616,7 @@ def build_summary(results: list[CheckResult]) -> dict[str, object]:
                 "total_points": 0,
                 "passed_points": 0,
                 "failed_points": 0,
-                "missing_md_points": 0,
+                "missing_source_points": 0,
                 "accuracy": 0.0,
                 "all_passed": False,
             },
@@ -536,7 +660,7 @@ def empty_summary_row(category: str) -> dict[str, object]:
         "total_points": 0,
         "passed_points": 0,
         "failed_points": 0,
-        "missing_md_points": 0,
+        "missing_source_points": 0,
         "accuracy": 0.0,
     }
 
@@ -547,8 +671,8 @@ def update_summary_row(row: dict[str, object], result: CheckResult) -> None:
         row["passed_points"] = int(row["passed_points"]) + 1
     else:
         row["failed_points"] = int(row["failed_points"]) + 1
-    if result.reason == "md_not_found":
-        row["missing_md_points"] = int(row["missing_md_points"]) + 1
+    if result.reason == "source_not_found":
+        row["missing_source_points"] = int(row["missing_source_points"]) + 1
 
 
 def finalize_summary_row(row: dict[str, object]) -> None:
@@ -574,7 +698,7 @@ def write_summary_csv(path: Path, summary: dict[str, object]) -> None:
         "total_points",
         "passed_points",
         "failed_points",
-        "missing_md_points",
+        "missing_source_points",
         "accuracy",
         "all_passed",
     ]
@@ -590,12 +714,14 @@ def write_report_json(
     *,
     xlsx_path: Path,
     ocr_dir: Path,
+    compare_patterns: list[str],
     results: list[CheckResult],
     summary: dict[str, object],
 ) -> None:
     payload = {
         "xlsx_path": str(xlsx_path),
         "ocr_dir": str(ocr_dir),
+        "compare_patterns": compare_patterns,
         "summary": summary,
         "details": [asdict(result) for result in results],
     }
@@ -607,25 +733,27 @@ def write_report_md(
     *,
     xlsx_path: Path,
     ocr_dir: Path,
+    compare_patterns: list[str],
     results: list[CheckResult],
     summary: dict[str, object],
 ) -> None:
     failed = [result for result in results if not result.passed]
     lines = [
-        "# OCR Markdown Test Point Check",
+        "# OCR Source Test Point Check",
         "",
         f"- OCR dir: `{ocr_dir}`",
         f"- Test workbook: `{xlsx_path}`",
+        f"- Compare patterns: `{', '.join(compare_patterns)}`",
         "",
         "## Summary",
         "",
-        "| Category | Total | Passed | Failed | Missing MD | Accuracy |",
+        "| Category | Total | Passed | Failed | Missing Source | Accuracy |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     for row in [summary["overall"], *summary["by_category"]]:
         lines.append(
             "| {category} | {total_points} | {passed_points} | {failed_points} | "
-            "{missing_md_points} | {accuracy:.2%} |".format(**row)
+            "{missing_source_points} | {accuracy:.2%} |".format(**row)
         )
     lines.extend(["", "## Failed Test Points", ""])
     if not failed:
@@ -652,11 +780,11 @@ def escape_md(value: object) -> str:
 
 
 def print_summary(summary: dict[str, object]) -> None:
-    print("category,total,passed,failed,missing_md,accuracy")
+    print("category,total,passed,failed,missing_source,accuracy")
     for row in [summary["overall"], *summary["by_category"]]:
         print(
             "{category},{total_points},{passed_points},{failed_points},"
-            "{missing_md_points},{accuracy:.2%}".format(**row)
+            "{missing_source_points},{accuracy:.2%}".format(**row)
         )
 
 

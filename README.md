@@ -310,7 +310,7 @@ output/docker_benchmark/docker_benchmark.xlsx
 
 ## OCR 测试点验收
 
-如果需要把 `测试点汇总.xlsx` 里的测试点逐条和 OCR 生成的 Markdown 对比，可以运行：
+如果需要把 `测试点汇总.xlsx` 里的测试点逐条和 OCR 输出文件对比，可以运行：
 
 ```bash
 cd /root/mineru_workspace
@@ -320,7 +320,41 @@ python3 scripts/check_ocr_md_test_points.py \
   --output-dir output/ocr_first/test_point_check
 ```
 
-脚本会自动读取 `ocr_first` 下的 `测试点汇总.xlsx`，识别 `文件夹`、`文件名`、`测试点1..测试点N`，递归查找对应 Markdown，并忽略空格/换行检查测试点文字是否完整出现。
+默认会和 `.md` 对比。脚本会自动读取 `ocr_first` 下的 `测试点汇总.xlsx`，识别 `文件夹`、`文件名`、`测试点1..测试点N`，递归查找对应输出文件，并忽略空格/换行检查测试点文字是否完整出现。
+
+如果要改成和结构化 OCR 产物对比：
+
+```bash
+# 只和 content_list_v2 比较，适合验收 OCR 识别文本是否存在
+python3 scripts/check_ocr_md_test_points.py \
+  --ocr-dir output/ocr_first \
+  --output-dir output/ocr_first/test_point_check_content_v2 \
+  --compare-preset content-v2
+
+# 只和 middle.json 比较，信息最全，但噪声也最多
+python3 scripts/check_ocr_md_test_points.py \
+  --ocr-dir output/ocr_first \
+  --output-dir output/ocr_first/test_point_check_middle \
+  --compare-preset middle
+
+# 自定义一个或多个文件模式
+python3 scripts/check_ocr_md_test_points.py \
+  --ocr-dir output/ocr_first \
+  --output-dir output/ocr_first/test_point_check_custom \
+  --compare-glob "*.md,*_content_list_v2.json"
+```
+
+内置 `--compare-preset` 选项：
+
+```text
+md          -> *.md
+content-v2  -> *_content_list_v2.json
+middle      -> *_middle.json
+json        -> *.json
+all         -> *.md, *_content_list_v2.json, *_middle.json
+```
+
+对 JSON 文件，脚本会递归抽取其中的字符串再比较，不需要人工清洗 JSON。
 
 输出文件：
 
@@ -331,7 +365,7 @@ output/ocr_first/test_point_check/check_report.json
 output/ocr_first/test_point_check/check_report.md
 ```
 
-`check_summary.csv` 会按 `登记文档`、`手写体文档`、`文书档案`、`印刷体文档` 输出正确率；`check_detail.csv` 会记录每个测试点是正确还是错误，以及对应的 Markdown 路径。
+`check_summary.csv` 会按 `登记文档`、`手写体文档`、`文书档案`、`印刷体文档` 输出正确率；`check_detail.csv` 会记录每个测试点是正确还是错误，以及对应的比较来源文件路径。
 
 ## 图片输入和整页截图
 
