@@ -219,6 +219,100 @@ def test_extract_pdf_file_accepts_image_and_converts_to_pdf(tmp_path: Path) -> N
     assert any(artifact["kind"] == "converted_pdf" for artifact in payload["artifacts"])
 
 
+def test_extract_pdf_file_flattens_mineru_pdf_artifact_dir(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "input" / "1.pdf"
+    pdf_path.parent.mkdir()
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            output_dir = Path(document["meta"]["mineru_options"]["output_dir"])
+            mineru_auto_dir = output_dir / "1" / "auto"
+            mineru_auto_dir.mkdir(parents=True)
+            middle_json = mineru_auto_dir / "1_middle.json"
+            middle_json.write_text("{}", encoding="utf-8")
+            artifact = ArtifactRef(kind="middle_json", uri=str(middle_json))
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text="pdf text",
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    result = extract_pdf_file(
+        pdf_path,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+    )
+
+    artifact_dir = Path(result.artifact_dir)
+    assert result.success is True
+    assert Path(result.json_path or "") == artifact_dir / "1.json"
+    assert (artifact_dir / "1_middle.json").exists()
+    assert not (artifact_dir / "1").exists()
+    assert not (artifact_dir / "auto").exists()
+    payload = json.loads(Path(result.json_path or "").read_text(encoding="utf-8"))
+    assert payload["artifacts"][0]["uri"] == str(artifact_dir / "1_middle.json")
+    assert payload["pages"][0]["layout_ref"]["uri"] == str(artifact_dir / "1_middle.json")
+
+
+def test_extract_pdf_file_flattens_converted_image_artifact_dir(tmp_path: Path) -> None:
+    from PIL import Image
+
+    image_path = tmp_path / "input" / "10_01.jpg"
+    image_path.parent.mkdir()
+    Image.new("RGB", (32, 24), (255, 255, 255)).save(image_path)
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            output_dir = Path(document["meta"]["mineru_options"]["output_dir"])
+            mineru_stem = Path(document["file_uri"]).stem
+            assert mineru_stem == "10_01.converted"
+            mineru_auto_dir = output_dir / mineru_stem / "auto"
+            mineru_auto_dir.mkdir(parents=True)
+            middle_json = mineru_auto_dir / "10_01.converted_middle.json"
+            middle_json.write_text("{}", encoding="utf-8")
+            artifact = ArtifactRef(kind="middle_json", uri=str(middle_json))
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text="image text",
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    result = extract_pdf_file(
+        image_path,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+    )
+
+    artifact_dir = Path(result.artifact_dir)
+    assert result.success is True
+    assert Path(result.json_path or "") == artifact_dir / "10_01.json"
+    assert Path(result.converted_pdf_path or "") == artifact_dir / "10_01.converted.pdf"
+    assert (artifact_dir / "10_01.converted_middle.json").exists()
+    assert not (artifact_dir / "10_01.converted").exists()
+    assert not (artifact_dir / "auto").exists()
+    payload = json.loads(Path(result.json_path or "").read_text(encoding="utf-8"))
+    assert payload["artifacts"][0]["uri"] == str(artifact_dir / "10_01.converted_middle.json")
+
+
 def test_extract_pdf_file_writes_error_json_for_invalid_input(tmp_path: Path) -> None:
     result = extract_pdf_file(
         tmp_path / "missing.pdf",
@@ -449,8 +543,8 @@ def test_extract_pdf_dir_preserves_recursive_relative_directories(tmp_path: Path
     item = report.items[0]
     assert item.relative_input_path == "3-WS-001/0189.jpg"
     assert item.output_relative_dir == "3-WS-001"
-    assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0189.json"
     assert Path(item.artifact_dir) == tmp_path / "output" / "3-WS-001" / "0189"
+    assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0189" / "0189.json"
     assert Path(item.converted_pdf_path or "") == tmp_path / "output" / "3-WS-001" / "0189" / "0189.converted.pdf"
 
 
@@ -488,5 +582,5 @@ def test_extract_pdf_dir_preserves_direct_business_folder_name(tmp_path: Path) -
     item = report.items[0]
     assert item.relative_input_path == "0190.pdf"
     assert item.output_relative_dir == "3-WS-001"
-    assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0190.json"
     assert Path(item.artifact_dir) == tmp_path / "output" / "3-WS-001" / "0190"
+    assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0190" / "0190.json"

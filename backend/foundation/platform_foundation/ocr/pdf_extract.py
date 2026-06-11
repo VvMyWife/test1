@@ -164,9 +164,8 @@ class MinerUPdfFileOperator:
         resolved_source_name = source_file_name or resolved_input.name
         output_stem = _safe_stem(resolved_source_name or resolved_input.name)
         artifact_dir = output_root / output_stem
-        json_path = output_root / f"{output_stem}.json"
-        error_path = output_root / f"{output_stem}.error.json"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        json_path = artifact_dir / f"{output_stem}.json"
+        error_path = artifact_dir / f"{output_stem}.error.json"
 
         resolved_table_engine = _resolve_table_engine(
             use_paddle_tables=use_paddle_tables,
@@ -179,6 +178,8 @@ class MinerUPdfFileOperator:
         if overwrite:
             _unlink_if_exists(json_path)
             _unlink_if_exists(error_path)
+            _remove_path_if_exists(artifact_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
 
         started = time.perf_counter()
         input_type = "pdf"
@@ -222,6 +223,11 @@ class MinerUPdfFileOperator:
                 paddle_device=paddle_device,
                 mineru_options=options,
                 operator_factory=self._operator_factory_for(resolved_table_engine),
+            )
+            parsed = _flatten_mineru_output_dir(
+                parsed,
+                artifact_dir=artifact_dir,
+                mineru_pdf_path=pdf_for_mineru,
             )
             artifacts = list(parsed.artifacts)
             if converted_pdf_path is not None:
@@ -922,8 +928,8 @@ def _result_from_existing_json(
     output_relative_dir: str | None = None,
 ) -> PdfFileExtractResult | None:
     output_stem = _safe_stem(source_file_name or pdf_path.name)
-    json_path = output_dir / f"{output_stem}.json"
     artifact_dir = output_dir / output_stem
+    json_path = artifact_dir / f"{output_stem}.json"
     if not json_path.exists():
         return None
     try:
@@ -1076,6 +1082,84 @@ def _convert_image_to_pdf(image_path: Path, output_pdf_path: Path) -> None:
         elif converted.mode != "RGB":
             converted = converted.convert("RGB")
         converted.save(output_pdf_path, "PDF", resolution=300.0)
+
+
+def _flatten_mineru_output_dir(result: Any, *, artifact_dir: Path, mineru_pdf_path: Path) -> Any:
+    """Move MinerU's extra <doc_stem>/<parse_method> layers into this operator's artifact dir."""
+
+    mineru_output_dir = artifact_dir / _safe_stem(mineru_pdf_path.name)
+    if not mineru_output_dir.is_dir():
+        return result
+    old_root = mineru_output_dir.resolve()
+    new_root = artifact_dir.resolve()
+    if old_root == new_root:
+        return result
+
+    relocations = _mineru_output_relocations(old_root, new_root)
+    parse_method_dir = mineru_output_dir / "auto"
+    if parse_method_dir.is_dir():
+        for child in list(parse_method_dir.iterdir()):
+            destination = artifact_dir / child.name
+            _remove_path_if_exists(destination)
+            shutil.move(str(child), str(destination))
+        try:
+            parse_method_dir.rmdir()
+        except OSError:
+            pass
+
+    for child in list(mineru_output_dir.iterdir()):
+        destination = artifact_dir / child.name
+        _remove_path_if_exists(destination)
+        shutil.move(str(child), str(destination))
+    try:
+        mineru_output_dir.rmdir()
+    except OSError:
+        pass
+    return _rewrite_model_path_prefixes(result, relocations)
+
+
+def _mineru_output_relocations(old_root: Path, new_root: Path) -> list[tuple[Path, Path]]:
+    relocations: list[tuple[Path, Path]] = []
+    auto_dir = old_root / "auto"
+    if auto_dir.is_dir():
+        relocations.append((auto_dir, new_root))
+    relocations.append((old_root, new_root))
+    return relocations
+
+
+def _rewrite_model_path_prefixes(model: Any, relocations: list[tuple[Path, Path]]) -> Any:
+    if not relocations or not hasattr(model, "model_dump"):
+        return model
+    data = model.model_dump(mode="python")
+    rewritten = _rewrite_path_prefixes(data, relocations)
+    return model.__class__.model_validate(rewritten)
+
+
+def _rewrite_path_prefixes(value: Any, relocations: list[tuple[Path, Path]]) -> Any:
+    if isinstance(value, dict):
+        return {key: _rewrite_path_prefixes(item, relocations) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_path_prefixes(item, relocations) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_rewrite_path_prefixes(item, relocations) for item in value)
+    if isinstance(value, str):
+        return _rewrite_path_string(value, relocations)
+    return value
+
+
+def _rewrite_path_string(value: str, relocations: list[tuple[Path, Path]]) -> str:
+    for old_root, new_root in relocations:
+        old_value = str(old_root)
+        new_value = str(new_root)
+        if value == old_value:
+            return new_value
+        if value.startswith(old_value + os.sep):
+            return new_value + value[len(old_value):]
+        if os.sep != "/" and value.startswith(old_value.replace(os.sep, "/") + "/"):
+            old_posix = old_value.replace(os.sep, "/")
+            new_posix = new_value.replace(os.sep, "/")
+            return new_posix + value[len(old_posix):]
+    return value
 
 
 def _render_pdf_page_screenshots(
@@ -1252,6 +1336,15 @@ def _unlink_if_exists(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def _remove_path_if_exists(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def _daft_available() -> bool:

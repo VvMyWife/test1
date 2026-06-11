@@ -248,13 +248,15 @@ docker compose exec mineru-operator mineru-operator-batch \
 ```text
 /workspace/output/ocr_qizhi/
 └── 3-WS-001/
-    ├── 0189.json
     ├── 0189/
-    │   ├── auto/
-    │   └── 0189.converted.pdf
-    ├── 0190.json
+    │   ├── 0189.json
+    │   ├── 0189.converted.pdf
+    │   ├── 0189.converted_middle.json
+    │   └── 0189.converted_content_list.json
     └── 0190/
-        └── auto/
+        ├── 0190.json
+        ├── 0190_middle.json
+        └── 0190_content_list.json
 ```
 
 整页截图导出默认关闭。推荐直接用 CLI 参数开启：
@@ -287,7 +289,9 @@ docker compose exec \
 
 ```text
 output/5/
-├── auto/
+├── 5.json
+├── 5_middle.json
+├── 5_content_list.json
 └── page_screenshots/
     ├── page_0001.png
     ├── page_0002.png
