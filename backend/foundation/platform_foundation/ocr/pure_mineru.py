@@ -55,7 +55,7 @@ def extract_pdf(
     lang: str = "ch",
     extra_args: Sequence[str] | None = None,
     table_engine: str = "ocr",
-    paddle_table_mode: str = "ppstructurev3",
+    paddle_table_mode: str = "auto",
     paddle_device: str | None = None,
     mineru_options: Mapping[str, Any] | None = None,
     operator_factory: Callable[[], LayoutExtractMinerUOperator] = LayoutExtractMinerUPaddleTableOperator,

@@ -1,17 +1,20 @@
-# CUDA 11.8 is the conservative default for older NVIDIA drivers such as 535.xx.
+# CUDA 13.0 is the default for RTX 50-series hosts with recent NVIDIA drivers.
 # The image intentionally uses two Python virtualenvs:
 # - /opt/venvs/mineru: MinerU + Torch + platform_foundation
 # - /opt/venvs/paddle: PaddleOCR + Paddle GPU + platform_foundation Paddle API
 #
 # Keeping Paddle and Torch in separate environments avoids the cuDNN/NCCL wheel
 # conflicts seen when installing both stacks into a single Python environment.
-ARG BASE_IMAGE=nvidia/cuda:11.8.0-runtime-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:13.0.0-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
-ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu118/
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+ARG TORCH_VERSION=2.10.0+cu130
+ARG TORCHVISION_VERSION=0.25.0+cu130
+ARG TORCHAUDIO_VERSION=2.10.0+cu130
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -27,7 +30,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_TABLE_API_PORT=8200 \
     PADDLE_TABLE_API_URL=http://127.0.0.1:8200 \
     PADDLE_TABLE_API_PRELOAD=true \
-    PADDLE_TABLE_API_PRELOAD_MODES=table_structure,ppstructurev3 \
+    PADDLE_TABLE_API_PRELOAD_MODES=table_structure \
     PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS= \
     ENABLE_PADDLE_API=true \
     XDG_CACHE_HOME=/workspace/.cache \
@@ -61,12 +64,12 @@ RUN python3 -m venv /opt/venvs/mineru \
     && /opt/venvs/mineru/bin/python -m pip install -U pip setuptools wheel \
     && /opt/venvs/paddle/bin/python -m pip install -U pip setuptools wheel
 
-# MinerU/Torch environment. Torch is installed from the CUDA 11.8 PyTorch wheel index.
+# MinerU/Torch environment. Torch is installed from a CUDA wheel index that supports RTX 50-series.
 RUN /opt/venvs/mineru/bin/python -m pip install \
         --index-url "${PYTORCH_INDEX_URL}" \
-        torch==2.6.0+cu118 \
-        torchvision==0.21.0+cu118 \
-        torchaudio==2.6.0+cu118 \
+        torch=="${TORCH_VERSION}" \
+        torchvision=="${TORCHVISION_VERSION}" \
+        torchaudio=="${TORCHAUDIO_VERSION}" \
     && /opt/venvs/mineru/bin/python -m pip install \
         -i "${PIP_INDEX_URL}" \
         "mineru[pipeline]==3.1.6" \
@@ -80,7 +83,6 @@ RUN /opt/venvs/paddle/bin/python -m pip install \
         paddlepaddle-gpu==3.3.1 \
     && /opt/venvs/paddle/bin/python -m pip install \
         -i "${PIP_INDEX_URL}" \
-        "nvidia-cudnn-cu11<9" \
         paddleocr==3.5.0 \
         "paddlex[ocr]==3.5.2" \
         fastapi==0.136.1 \

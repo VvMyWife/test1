@@ -18,7 +18,7 @@ export PADDLE_TABLE_API_URL
 export MINERU_MODEL_SOURCE="${MINERU_MODEL_SOURCE:-modelscope}"
 export MINERU_API_MAX_CONCURRENT_REQUESTS="${MINERU_API_MAX_CONCURRENT_REQUESTS:-128}"
 export PADDLE_TABLE_API_PRELOAD="${PADDLE_TABLE_API_PRELOAD:-true}"
-export PADDLE_TABLE_API_PRELOAD_MODES="${PADDLE_TABLE_API_PRELOAD_MODES:-table_structure,ppstructurev3}"
+export PADDLE_TABLE_API_PRELOAD_MODES="${PADDLE_TABLE_API_PRELOAD_MODES:-table_structure}"
 export PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS="${PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS:-}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${WORKSPACE_ROOT}/.cache}"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/.cache/huggingface}"
@@ -33,6 +33,29 @@ paddle_pid=""
 
 log() {
   printf '[mineru-docker] %s\n' "$*"
+}
+
+configure_cuda_visible_devices() {
+  local requested="${MINERU_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-auto}}"
+  if [[ "${requested}" != "auto" ]]; then
+    export CUDA_VISIBLE_DEVICES="${requested}"
+    log "using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+    return
+  fi
+
+  unset CUDA_VISIBLE_DEVICES
+  local selected=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    selected="$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null \
+      | awk -F, 'BEGIN {max=-1; idx=""} {gsub(/ /, "", $1); gsub(/ /, "", $2); free=$2+0; if (free > max) {max=free; idx=$1}} END {print idx}')"
+  fi
+  if [[ -n "${selected}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${selected}"
+    log "auto-selected CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+  else
+    unset CUDA_VISIBLE_DEVICES
+    log "CUDA_VISIBLE_DEVICES auto selection unavailable; leaving all GPUs visible"
+  fi
 }
 
 wait_http() {
@@ -64,8 +87,9 @@ start_mineru_api() {
     log "mineru-api already available at ${MINERU_API_URL}"
     return
   fi
-  log "starting mineru-api at ${MINERU_API_URL}"
-  "${MINERU_VENV}/bin/mineru-api" \
+  local mineru_device_mode="${MINERU_API_DEVICE_MODE:-${MINERU_DEVICE_MODE:-cuda}}"
+  log "starting mineru-api at ${MINERU_API_URL} device=${mineru_device_mode}"
+  MINERU_DEVICE_MODE="${mineru_device_mode}" "${MINERU_VENV}/bin/mineru-api" \
     --host "${MINERU_API_HOST}" \
     --port "${MINERU_API_PORT}" \
     --enable-vlm-preload "${MINERU_API_PRELOAD:-false}" \
@@ -128,6 +152,7 @@ run_batch() {
 
 case "${1:-server}" in
   server)
+    configure_cuda_visible_devices
     start_mineru_api
     if [[ "${ENABLE_PADDLE_API:-false}" == "true" ]]; then
       start_paddle_api
@@ -136,6 +161,7 @@ case "${1:-server}" in
     wait -n
     ;;
   batch)
+    configure_cuda_visible_devices
     run_batch "$@"
     ;;
   healthcheck)

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 from urllib.request import url2pathname
@@ -30,6 +33,10 @@ from .paddle_table import (
 
 JsonDict = dict[str, Any]
 CommandRunner = Callable[[list[str], float | None], None]
+_MINERU_API_TASK_DIR_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 class MinerUServiceError(RuntimeError):
@@ -164,7 +171,23 @@ class MinerUCliDocumentService:
         opts = dict(options or {})
         output_dir = _prepare_output_dir(self.config.output_root, opts.get("output_dir"))
         command = self._build_command(resolved_file, output_dir, opts)
-        self.command_runner(command, _coerce_float(opts.get("timeout_seconds"), self.config.timeout_seconds))
+        command_started_at = time.time()
+        cleaned_api_task_dirs: tuple[Path, ...] = ()
+        try:
+            self.command_runner(
+                command,
+                _coerce_float(opts.get("timeout_seconds"), self.config.timeout_seconds),
+            )
+        finally:
+            if _should_cleanup_mineru_api_task_dirs(
+                options=opts,
+                api_url=_coerce_optional_str(opts.get("api_url"), self.config.api_url),
+            ):
+                cleaned_api_task_dirs = _cleanup_mineru_api_task_dirs(
+                    input_path=resolved_file,
+                    output_dir=output_dir,
+                    started_at=command_started_at,
+                )
 
         middle_json_path = _locate_single_artifact(output_dir, "*_middle.json")
         content_list_path = _locate_optional_single_artifact(output_dir, "*_content_list.json")
@@ -173,7 +196,10 @@ class MinerUCliDocumentService:
         table_candidates_by_page = None
         if content_list_path is not None:
             content_list_payload = json.loads(content_list_path.read_text(encoding="utf-8"))
-            text_blocks_by_page = parse_mineru_content_list_json(content_list_payload)
+            text_blocks_by_page = parse_mineru_content_list_json(
+                content_list_payload,
+                base_dir=content_list_path.parent,
+            )
             table_candidates_by_page = parse_mineru_table_candidates_json(
                 content_list_payload,
                 base_dir=content_list_path.parent,
@@ -194,6 +220,8 @@ class MinerUCliDocumentService:
 
         meta = dict(parsed.meta)
         meta["output_dir"] = str(output_dir)
+        if cleaned_api_task_dirs:
+            meta["cleaned_mineru_api_task_dirs"] = [str(path) for path in cleaned_api_task_dirs]
         artifacts = _collect_mineru_artifacts(
             output_dir=output_dir,
             middle_json_ref=parsed.middle_json_ref,
@@ -337,7 +365,11 @@ def parse_mineru_middle_json(
     )
 
 
-def parse_mineru_content_list_json(content_list: Any) -> dict[int, tuple[TextBlock, ...]]:
+def parse_mineru_content_list_json(
+    content_list: Any,
+    *,
+    base_dir: Path | None = None,
+) -> dict[int, tuple[TextBlock, ...]]:
     """Parse MinerU ``*_content_list.json`` into Daft-friendly text blocks.
 
     The official MinerU output stores block-level text as a flat list with
@@ -368,6 +400,8 @@ def parse_mineru_content_list_json(content_list: Any) -> dict[int, tuple[TextBlo
         for key in ("text_level", "img_path", "table_caption", "table_footnote"):
             if key in item:
                 meta[key] = item[key]
+        if base_dir is not None and item.get("img_path") is not None:
+            meta["image_uri"] = _resolve_relative_artifact(base_dir, item.get("img_path"))
 
         grouped.setdefault(page_index, []).append(
             TextBlock(
@@ -405,12 +439,14 @@ def parse_mineru_table_candidates_json(
         image_uri = _resolve_relative_artifact(base_dir, item.get("img_path"))
         captions = _as_str_list(item.get("table_caption"))
         footnotes = _as_str_list(item.get("table_footnote"))
+        html = _coerce_optional_str(item.get("table_body")) or _coerce_optional_str(item.get("html"))
         grouped.setdefault(page_index, []).append(
             {
                 "source": "mineru_content_list",
                 "page_index": page_index,
                 "bbox": bbox.model_dump(mode="python"),
                 "image_uri": image_uri,
+                "html": html,
                 "caption": "\n".join(captions) if captions else None,
                 "footnote": "\n".join(footnotes) if footnotes else None,
             }
@@ -447,7 +483,7 @@ def _extract_mineru_table_blocks(
             "has_html": html is not None,
         }
         if matched_candidate is not None:
-            meta["candidate"] = dict(matched_candidate)
+            meta["candidate"] = _table_candidate_meta(matched_candidate)
         tables.append(
             TableBlock(
                 table_id=f"p{page_index}-mineru-t{table_index}",
@@ -483,12 +519,18 @@ def _extract_mineru_table_blocks(
                 meta={
                     "source": "mineru_content_list_table",
                     "raw_source": candidate.get("source"),
-                    "candidate": dict(candidate),
+                    "candidate": _table_candidate_meta(candidate),
                 },
             )
         )
 
     return tuple(tables)
+
+
+def _table_candidate_meta(candidate: Mapping[str, Any]) -> JsonDict:
+    meta = dict(candidate)
+    meta.pop("html", None)
+    return meta
 
 
 def _extract_raw_table_blocks(page_payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -532,9 +574,23 @@ def _maybe_refine_table_cells_with_paddle(
         return parsed
 
     table_candidates_by_page = _extract_table_candidates_by_page(parsed)
+    paddle_table_mode = _coerce_optional_str(options.get("paddle_table_mode"), "auto").strip().lower()
+    should_run_without_tables = paddle_table_mode in {
+        "auto",
+        "paddle3_auto",
+        "paddle_auto",
+        "ppocrv5",
+        "pp_ocrv5",
+        "paddleocr",
+        "ocr",
+        "paddleocr_vl",
+        "paddleocrvl",
+        "vl",
+    }
     if (
         _coerce_bool(options.get("table_cell_refine_when_tables_present"), True)
         and not _coerce_bool(options.get("table_cell_refine_force"))
+        and not should_run_without_tables
         and not table_candidates_by_page
     ):
         return _attach_table_refine_skipped(parsed, reason="mineru_table_not_detected")
@@ -612,17 +668,21 @@ def _merge_table_result(
     pages: list[MinerUPageResult] = []
     for page in parsed.pages:
         table_blocks = tuple(table_result.tables_by_page.get(page.page_index, ()))
-        if not table_blocks:
+        paddle_text_blocks = tuple(table_result.text_blocks_by_page.get(page.page_index, ()))
+        if not table_blocks and not paddle_text_blocks:
             pages.append(page)
             continue
 
-        text_blocks = (
-            _drop_ocr_table_fallback_text_blocks(page.text_blocks)
-            if replace_existing_table_blocks
-            else list(page.text_blocks)
-        )
-        if replace_existing_table_blocks:
+        replace_text_blocks = _coerce_bool(table_result.meta.get("replace_text_blocks"))
+        if replace_text_blocks and paddle_text_blocks and not table_blocks:
+            text_blocks = list(paddle_text_blocks)
+        elif replace_existing_table_blocks and table_blocks:
+            text_blocks = _drop_ocr_table_fallback_text_blocks(page.text_blocks)
             text_blocks = _drop_text_blocks_inside_table_blocks(text_blocks, table_blocks)
+        else:
+            text_blocks = list(page.text_blocks)
+        if paddle_text_blocks and not replace_text_blocks:
+            text_blocks.extend(_new_text_blocks_only(text_blocks, paddle_text_blocks))
         if emit_text_blocks:
             text_blocks.extend(_table_cells_to_text_blocks(table_blocks))
         existing_table_blocks = () if replace_existing_table_blocks else page.table_blocks
@@ -633,6 +693,8 @@ def _merge_table_result(
             "provider": table_result.meta.get("provider", "paddleocr_ppstructurev3"),
             "table_count": len(table_blocks),
             "cell_count": sum(len(table.cells) for table in table_blocks),
+            "text_block_count": len(paddle_text_blocks),
+            "replace_text_blocks": replace_text_blocks,
             "artifact": (
                 table_result.artifact_ref.model_dump(mode="python")
                 if table_result.artifact_ref is not None
@@ -735,6 +797,35 @@ def _drop_text_blocks_inside_table_blocks(
 def _text_from_text_blocks(text_blocks: list[TextBlock]) -> str | None:
     text = "\n".join(block.text for block in text_blocks if block.text.strip())
     return text or None
+
+
+def _new_text_blocks_only(
+    existing_blocks: Sequence[TextBlock],
+    candidate_blocks: Sequence[TextBlock],
+) -> list[TextBlock]:
+    seen = {_text_block_dedupe_key(block) for block in existing_blocks}
+    unique: list[TextBlock] = []
+    for block in candidate_blocks:
+        key = _text_block_dedupe_key(block)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(block)
+    return unique
+
+
+def _text_block_dedupe_key(block: TextBlock) -> tuple[Any, ...]:
+    text = re.sub(r"\s+", " ", block.text or "").strip()
+    bbox = block.bounding_box
+    if bbox is None:
+        return (text, None)
+    return (
+        text,
+        round(float(bbox.x), 2),
+        round(float(bbox.y), 2),
+        round(float(bbox.w), 2),
+        round(float(bbox.h), 2),
+    )
 
 
 def _attach_table_refine_warning(
@@ -925,6 +1016,88 @@ def _prepare_output_dir(base_output_root: str | None, explicit_output_dir: Any) 
     return Path(tempfile.mkdtemp(prefix="mineru-"))
 
 
+def _should_cleanup_mineru_api_task_dirs(
+    *,
+    options: Mapping[str, Any],
+    api_url: str | None,
+) -> bool:
+    if not api_url or urlparse(api_url).scheme not in {"http", "https"}:
+        return False
+    raw_value = options.get(
+        "cleanup_api_task_dirs",
+        options.get("cleanup_mineru_api_task_dirs", os.environ.get("MINERU_CLEAN_API_TASK_DIRS")),
+    )
+    return _coerce_bool(raw_value, default=True)
+
+
+def _cleanup_mineru_api_task_dirs(
+    *,
+    input_path: Path,
+    output_dir: Path,
+    started_at: float,
+) -> tuple[Path, ...]:
+    """Remove MinerU API task dirs created for this uploaded input.
+
+    MinerU API stores asynchronous task artifacts under UUID-named directories,
+    usually beside the requested output root. The final operator artifacts have
+    already been copied into ``output_dir`` by the CLI before this cleanup runs.
+    """
+
+    try:
+        expected_size = input_path.stat().st_size
+    except OSError:
+        expected_size = None
+
+    cleaned: list[Path] = []
+    for root in _candidate_mineru_api_task_roots(output_dir):
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for candidate in children:
+            if not candidate.is_dir() or not _MINERU_API_TASK_DIR_RE.fullmatch(candidate.name):
+                continue
+            try:
+                task_stat = candidate.stat()
+            except OSError:
+                continue
+            if task_stat.st_mtime < started_at - 30:
+                continue
+            upload_path = candidate / "uploads" / input_path.name
+            try:
+                upload_stat = upload_path.stat()
+            except OSError:
+                continue
+            if expected_size is not None and upload_stat.st_size != expected_size:
+                continue
+            try:
+                shutil.rmtree(candidate)
+            except OSError:
+                continue
+            cleaned.append(candidate)
+    return tuple(cleaned)
+
+
+def _candidate_mineru_api_task_roots(output_dir: Path) -> tuple[Path, ...]:
+    resolved = output_dir.expanduser().resolve()
+    candidates: list[Path] = []
+    for index, candidate in enumerate((resolved, *resolved.parents)):
+        if index > 8:
+            break
+        candidates.append(candidate)
+        if candidate.name in {"output", "outputs"}:
+            break
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return tuple(deduped)
+
+
 def _locate_single_artifact(output_dir: Path, pattern: str) -> Path:
     matches = sorted(output_dir.rglob(pattern))
     if not matches:
@@ -1106,6 +1279,7 @@ def _extract_table_candidates(page_payload: Mapping[str, Any]) -> tuple[JsonDict
                 "table_index": index,
                 "bbox": bbox.model_dump(mode="python"),
                 "image_uri": None,
+                "html": _extract_first_html(block),
                 "caption": "\n".join(_iter_text_fragments(block.get("table_caption"))),
                 "footnote": "\n".join(_iter_text_fragments(block.get("table_footnote"))),
             }

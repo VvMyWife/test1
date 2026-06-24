@@ -33,7 +33,7 @@ class PaddleTableExtractRequest(BaseModel):
 class PaddleTableWarmupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    modes: list[str] = Field(default_factory=lambda: ["table_structure", "ppstructurev3"])
+    modes: list[str] = Field(default_factory=lambda: ["table_structure"])
     options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -76,7 +76,7 @@ def preload_models() -> None:
         return
     modes = [
         item.strip()
-        for item in os.environ.get("PADDLE_TABLE_API_PRELOAD_MODES", "table_structure,ppstructurev3").split(",")
+        for item in os.environ.get("PADDLE_TABLE_API_PRELOAD_MODES", "table_structure").split(",")
         if item.strip()
     ]
     warmup_paddle_table_models(modes=modes)

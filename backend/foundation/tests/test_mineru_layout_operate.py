@@ -365,6 +365,27 @@ def test_extract_pdf_file_flattens_converted_image_artifact_dir(tmp_path: Path) 
             mineru_auto_dir.mkdir(parents=True)
             middle_json = mineru_auto_dir / "10_01.converted_middle.json"
             middle_json.write_text("{}", encoding="utf-8")
+            markdown = mineru_auto_dir / "10_01.converted.md"
+            markdown.write_text(
+                "# Demo\n\n<table><tr><td>姓名</td><td>结果</td></tr></table>\n",
+                encoding="utf-8",
+            )
+            content_list = mineru_auto_dir / "10_01.converted_content_list.json"
+            content_list.write_text(
+                json.dumps(
+                    [
+                        {"type": "header", "text": "实名认证信息表", "bbox": [30, 1, 92, 15]},
+                        {"type": "header", "text": "页码，1/1", "bbox": [321, -1, 360, 13]},
+                        {
+                            "type": "footer",
+                            "text": "http://example.local/print 2025/5/14",
+                            "bbox": [34, 542, 363, 557],
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
             artifact = ArtifactRef(kind="middle_json", uri=str(middle_json))
             yield PageItem(
                 archive_id=document["archive_id"],
@@ -391,10 +412,139 @@ def test_extract_pdf_file_flattens_converted_image_artifact_dir(tmp_path: Path) 
     assert Path(result.json_path or "") == artifact_dir / "10_01.json"
     assert Path(result.converted_pdf_path or "") == artifact_dir / "10_01.converted.pdf"
     assert (artifact_dir / "10_01.converted_middle.json").exists()
+    markdown = artifact_dir / "10_01.converted.md"
+    assert markdown.exists()
+    markdown_text = markdown.read_text(encoding="utf-8")
+    assert "<table" not in markdown_text
+    assert "姓名 | 结果" in markdown_text
+    assert "实名认证信息表 | 页码，1/1" in markdown_text
+    assert markdown_text.rstrip().endswith("http://example.local/print 2025/5/14")
     assert not (artifact_dir / "10_01.converted").exists()
     assert not (artifact_dir / "auto").exists()
     payload = json.loads(Path(result.json_path or "").read_text(encoding="utf-8"))
     assert payload["artifacts"][0]["uri"] == str(artifact_dir / "10_01.converted_middle.json")
+
+
+def test_markdown_html_table_normalization_preserves_grid_and_repairs_dates() -> None:
+    markdown = (
+        "\u4e1a\u52a1\u6d41\u6c34\u53f7:510604Y3202505140001\n\n"
+        "<table>"
+        "<tr><td>\u59d3\u540d</td><td>\u8eab\u4efd\u8bc1\u53f7\u7801</td>"
+        "<td>\u89d2\u8272</td><td>\u5b9e\u540d\u8ba4\u8bc1\u65f6\u95f4</td>"
+        "<td>\u7ed3\u679c</td></tr>"
+        "<tr><td>\u5411\u4fca\u5b66</td><td>510626199209193753</td>"
+        "<td>\u6cd5\u5b9a\u4ee3\u8868\u4eba</td><td></td><td>\u6210\u529f</td></tr>"
+        "<tr><td>\u5411\u4fca\u5b66</td><td>510626199209193753</td>"
+        "<td>\u80a1\u4e1c</td><td>2\u65e5</td><td>\u6210\u529f</td></tr>"
+        "</table>\n"
+    )
+
+    normalized = pdf_extract_module._replace_html_tables_with_text(markdown)
+
+    assert "<table" not in normalized
+    assert "| --- | --- | --- | --- | --- |" in normalized
+    assert normalized.count("\u5411\u4fca\u5b66") == 2
+    assert normalized.count("510626199209193753") == 2
+    assert normalized.count("2025\u5e745\u670814\u65e5") == 2
+
+
+def test_markdown_normalization_appends_seal_section_last(tmp_path: Path) -> None:
+    markdown_path = tmp_path / "demo.converted.md"
+    mineru_seal_text = "\u5fb7\u963b\u5efa\u946b\u5e02\u653f\u8bbe\u65bd\u7ba1\u7406\u6709\u9650\u8d23\u4efb\u516c\u53f8"
+    markdown_path.write_text(
+        f"\u6b63\u6587\n\n![](images/seal.jpg)  \n{mineru_seal_text}\n",
+        encoding="utf-8",
+    )
+    markdown_path.with_name("demo.converted_content_list.json").write_text(
+        json.dumps(
+            [
+                {
+                    "type": "footer",
+                    "text": "\u9875\u811a",
+                    "bbox": [0, 900, 100, 920],
+                    "page_idx": 0,
+                },
+                {
+                    "type": "seal",
+                    "text": mineru_seal_text,
+                    "img_path": "images/seal.jpg",
+                    "bbox": [637, 598, 846, 744],
+                    "page_idx": 0,
+                },
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "paddle_table_structure.json").write_text(
+        json.dumps(
+            {
+                "text_blocks_by_page": {
+                    "0": [
+                        {
+                            "text": "\u7edf\u4e00\u793e\u4f1a\u4fe1\u7528\u4ee3\u7801 91510604MA6ABCDE1X",
+                            "block_type": "seal_text",
+                        }
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pdf_extract_module._normalize_markdown_artifacts(tmp_path)
+    pdf_extract_module._normalize_markdown_artifacts(tmp_path)
+
+    normalized = markdown_path.read_text(encoding="utf-8")
+    assert normalized.count("\u5370\u7ae0\uff1a") == 1
+    assert "![](images/seal.jpg)" not in normalized
+    assert normalized.count(mineru_seal_text) == 0
+    assert normalized.index("\u9875\u811a") < normalized.index("\u5370\u7ae0\uff1a")
+    assert normalized.rstrip().endswith(
+        "\u5370\u7ae0\uff1a\n\n"
+        "\u7edf\u4e00\u793e\u4f1a\u4fe1\u7528\u4ee3\u7801 91510604MA6ABCDE1X"
+    )
+
+
+def test_markdown_normalization_rebuilds_seal_mode_from_paddle_blocks(tmp_path: Path) -> None:
+    markdown_path = tmp_path / "demo.converted.md"
+    markdown_path.write_text("\u6b63\u6587\u4e22\u5931\n\n\u76d6\u7387\n", encoding="utf-8")
+    (tmp_path / "paddle_table_structure.json").write_text(
+        json.dumps(
+            {
+                "provider": "paddleocr_ppocrv5_paddleocr_vl_seal",
+                "mode": "seal_vl_crops_ppocrv5",
+                "text_blocks_by_page": {
+                    "0": [
+                        {
+                            "text": "\u5168\u4f53\u6295\u8d44\u4eba\u7b7e\u5b57\uff08\u76d6\u7ae0\uff09\u7f57\u5efa",
+                            "block_type": "text",
+                            "bounding_box": {"x": 100, "y": 400, "w": 300, "h": 20},
+                        },
+                        {
+                            "text": "\u5fb7\u9633\u5efa\u946b\u5e02\u653f\u8bbe\u65bd\u7ba1\u7406\u6709\u9650\u8d23\u4efb\u516c\u53f8",
+                            "block_type": "seal_text",
+                            "bounding_box": {"x": 637, "y": 598, "w": 209, "h": 146},
+                        },
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pdf_extract_module._normalize_markdown_artifacts(tmp_path)
+
+    normalized = markdown_path.read_text(encoding="utf-8")
+    assert "\u6b63\u6587\u4e22\u5931" not in normalized
+    assert "\u76d6\u7387" not in normalized
+    assert "\u5168\u4f53\u6295\u8d44\u4eba\u7b7e\u5b57\uff08\u76d6\u7ae0\uff09\u7f57\u5efa" in normalized
+    assert normalized.rstrip().endswith(
+        "\u5370\u7ae0\uff1a\n\n"
+        "\u5fb7\u9633\u5efa\u946b\u5e02\u653f\u8bbe\u65bd\u7ba1\u7406\u6709\u9650\u8d23\u4efb\u516c\u53f8"
+    )
 
 
 def test_extract_pdf_file_writes_error_json_for_invalid_input(tmp_path: Path) -> None:

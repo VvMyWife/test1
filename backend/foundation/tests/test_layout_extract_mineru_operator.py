@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 import threading
 import time
+import types
+from typing import Any
 
 import pytest
 
+import platform_foundation.inference.paddle_table as paddle_table_module
 from platform_foundation.contracts import (
     ArtifactRef,
     BoundingBox,
@@ -29,9 +33,18 @@ from platform_foundation.inference.mineru import (
     MinerUDocumentParseResult,
     MinerUPageResult,
     _coerce_local_file_path,
+    _cleanup_mineru_api_task_dirs,
     _merge_table_result,
+    _should_cleanup_mineru_api_task_dirs,
 )
-from platform_foundation.inference.paddle_table import PaddleTableStructureResult, parse_paddle_structure_tables
+from platform_foundation.inference.paddle_table import (
+    PaddleTableStructureResult,
+    PaddleTableStructureService,
+    _build_paddleocr_vl,
+    _parse_table_structure_module_result,
+    parse_paddle_ocr_text_blocks,
+    parse_paddle_structure_tables,
+)
 from platform_foundation.ocr.pure_mineru import _build_mineru_options
 from platform_foundation.operators import OperatorContext, OperatorError
 from platform_foundation.operators.layout_extract_mineru import LayoutExtractMinerUOperator
@@ -173,6 +186,339 @@ def test_parse_mineru_table_candidates_json_extracts_table_crops(tmp_path: Path)
     assert candidate["bbox"]["w"] == 100
     assert candidate["image_uri"] == str(image_path.resolve())
     assert candidate["caption"] == "caption"
+
+
+def test_parse_mineru_table_candidates_json_preserves_table_body_html(tmp_path: Path) -> None:
+    candidates_by_page = parse_mineru_table_candidates_json(
+        [
+            {
+                "type": "table",
+                "bbox": [0, 0, 100, 50],
+                "page_idx": 0,
+                "img_path": "images/table.jpg",
+                "table_body": "<table><tr><td>姓名</td><td>结果</td></tr></table>",
+            }
+        ],
+        base_dir=tmp_path,
+    )
+
+    assert candidates_by_page[0][0]["html"] == "<table><tr><td>姓名</td><td>结果</td></tr></table>"
+
+
+def test_table_structure_fallback_fills_cell_text_from_mineru_html() -> None:
+    table = _parse_table_structure_module_result(
+        {"bbox": [[0, 0, 10, 10], [10, 0, 20, 10]], "structure_score": 0.9},
+        page_index=0,
+        table_index=0,
+        candidate={
+            "bbox": {"x": 0, "y": 0, "w": 20, "h": 10},
+            "html": "<table><tr><td>姓名</td><td>结果</td></tr></table>",
+        },
+        page_text_blocks=(),
+    )
+
+    assert table is not None
+    assert [cell.text for cell in table.cells] == ["姓名", "结果"]
+    assert table.cells[0].meta["text_source"] == "mineru_table_html"
+
+
+def test_table_structure_fallback_preserves_duplicate_cells_and_repairs_dates() -> None:
+    headers = [
+        "\u59d3\u540d",
+        "\u8eab\u4efd\u8bc1\u53f7\u7801",
+        "\u89d2\u8272",
+        "\u5b9e\u540d\u8ba4\u8bc1\u65f6\u95f4",
+        "\u4eba\u50cf\u4fe1\u606f",
+        "\u7b7e\u5b57\u4fe1\u606f",
+        "\u8ba4\u8bc1\u65b9\u5f0f",
+        "\u7ed3\u679c",
+    ]
+    rows = [
+        headers,
+        [
+            "\u5411\u4fca\u5b66",
+            "510626199209193753",
+            "\u6cd5\u5b9a\u4ee3\u8868\u4eba",
+            "",
+            "",
+            "",
+            "\u603b\u5c40\u8ba4\u8bc1",
+            "\u6210\u529f",
+        ],
+        [
+            "\u5411\u4fca\u5b66",
+            "510626199209193753",
+            "\u80a1\u4e1c",
+            "2\u65e5",
+            "",
+            "",
+            "\u603b\u5c40\u8ba4\u8bc1",
+            "\u6210\u529f",
+        ],
+    ]
+    html = "<table>" + "".join(
+        "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+        for row in rows
+    ) + "</table>"
+    boxes = [
+        [col * 10, row * 10, (col + 1) * 10, (row + 1) * 10]
+        for row in range(len(rows))
+        for col in range(len(headers))
+    ]
+
+    table = _parse_table_structure_module_result(
+        {"bbox": boxes, "structure_score": 0.9},
+        page_index=0,
+        table_index=0,
+        candidate={"bbox": {"x": 0, "y": 0, "w": 80, "h": 30}, "html": html},
+        page_text_blocks=(
+            TextBlock(
+                text="\u4e1a\u52a1\u6d41\u6c34\u53f7:510604Y3202505140001",
+                bounding_box=BoundingBox(x=0, y=40, w=80, h=10),
+            ),
+        ),
+    )
+
+    assert table is not None
+    texts = [cell.text for cell in table.cells]
+    assert texts.count("\u5411\u4fca\u5b66") == 2
+    assert texts.count("510626199209193753") == 2
+    assert texts[11] == "2025\u5e745\u670814\u65e5"
+    assert texts[19] == "2025\u5e745\u670814\u65e5"
+
+
+def test_ppstructurev3_artifact_includes_normalized_tables(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    class _FakePipeline:
+        def predict(self, *, input, **kwargs):  # noqa: ANN001
+            del input, kwargs
+            return [
+                {
+                    "page_index": 0,
+                    "width": 100,
+                    "height": 100,
+                    "table_res_list": [
+                        {
+                            "cell_box_list": [[0, 0, 20, 10], [20, 0, 40, 10]],
+                            "table_ocr_pred": {
+                                "rec_texts": ["\u59d3\u540d", "\u7ed3\u679c"],
+                                "rec_scores": [0.98, 0.97],
+                            },
+                        }
+                    ],
+                }
+            ]
+
+    monkeypatch.setattr(
+        "platform_foundation.inference.paddle_table._build_ppstructure_v3",
+        lambda options: _FakePipeline(),
+    )
+
+    result = PaddleTableStructureService()._extract_tables_with_ppstructurev3(
+        file_uri="/tmp/0062.jpg",
+        output_dir=tmp_path,
+        target_page_sizes={0: ImageSize(width=200, height=200)},
+        options={},
+    )
+
+    payload = json.loads((tmp_path / "paddle_table_structure.json").read_text(encoding="utf-8"))
+    assert payload["provider"] == "paddleocr_ppstructurev3"
+    assert payload["table_count"] == 1
+    assert payload["cell_count"] == 2
+    assert payload["tables_by_page"]["0"][0]["cells"][0]["text"] == "\u59d3\u540d"
+    assert payload["tables_by_page"]["0"][0]["cells"][1]["text"] == "\u7ed3\u679c"
+    assert payload["raw_results"][0]["table_res_list"][0]["table_ocr_pred"]["rec_texts"] == [
+        "\u59d3\u540d",
+        "\u7ed3\u679c",
+    ]
+    assert result.artifact_ref is not None
+
+
+def test_paddle_auto_falls_back_when_ppstructure_misses_html_cells(monkeypatch) -> None:  # noqa: ANN001
+    service = PaddleTableStructureService()
+    pp_table = TableBlock(
+        table_id="p0-t0",
+        page_index=0,
+        provider="paddleocr_ppstructurev3",
+        cells=[TableCell(cell_id="p0-t0-c0", text="\u59d3\u540d")],
+    )
+    fallback_table = TableBlock(
+        table_id="p0-t0",
+        page_index=0,
+        provider="paddleocr_table_structure",
+        cells=[
+            TableCell(cell_id="p0-t0-c0", text="\u59d3\u540d"),
+            TableCell(cell_id="p0-t0-c1", text="\u7ed3\u679c"),
+        ],
+    )
+
+    def fake_ppstructure(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return PaddleTableStructureResult(
+            tables_by_page={0: (pp_table,)},
+            meta={"provider": "paddleocr_ppstructurev3", "table_count": 1, "cell_count": 1},
+        )
+
+    def fake_mineru_crops(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return PaddleTableStructureResult(
+            tables_by_page={0: (fallback_table,)},
+            meta={"provider": "paddleocr_table_structure", "table_count": 1, "cell_count": 2},
+        )
+
+    monkeypatch.setattr(PaddleTableStructureService, "_extract_tables_with_ppstructurev3", fake_ppstructure)
+    monkeypatch.setattr(PaddleTableStructureService, "_extract_tables_from_mineru_crops", fake_mineru_crops)
+
+    result = service._extract_with_paddle3_auto(
+        file_uri="/tmp/0062.jpg",
+        output_dir=Path("/tmp/out"),
+        target_page_sizes={},
+        options={},
+        table_candidates_by_page={
+            0: [
+                {
+                    "html": "<table><tr><td>\u59d3\u540d</td><td>\u7ed3\u679c</td></tr></table>",
+                }
+            ]
+        },
+        page_text_blocks_by_page={},
+    )
+
+    assert result.tables_by_page[0][0].provider == "paddleocr_table_structure"
+    assert result.meta["mode"] == "auto_ppstructurev3_quality_fallback_mineru_crops"
+    assert result.meta["fallback_reason"] == "cell_coverage_below_mineru_html"
+
+
+def test_paddleocr_vl_builder_disables_queue_worker(monkeypatch) -> None:  # noqa: ANN001
+    captured: dict = {}
+
+    class _FakePaddleOCRVL:
+        def __init__(self, **kwargs):  # noqa: ANN001
+            captured.update(kwargs)
+
+    def fake_cached_paddle_object(**kwargs):  # noqa: ANN001
+        factory = kwargs["factory"]
+        return factory(kwargs["init_kwargs"])
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(PaddleOCRVL=_FakePaddleOCRVL),
+    )
+    monkeypatch.setattr(
+        "platform_foundation.inference.paddle_table._cached_paddle_object",
+        fake_cached_paddle_object,
+    )
+    monkeypatch.setattr(
+        "platform_foundation.inference.paddle_table._resolve_paddle_device",
+        lambda options: "gpu:0",
+    )
+
+    _build_paddleocr_vl({})
+
+    assert captured["use_queues"] is False
+    assert captured["vl_rec_max_concurrency"] == 1
+    assert captured["device"] == "gpu:0"
+
+
+def test_paddleocr_vl_predict_defaults_disable_queues_and_limit_tokens(
+    monkeypatch,  # noqa: ANN001
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakePaddleOCRVL:
+        def predict(self, input, **kwargs):  # noqa: ANN001
+            captured["input"] = input
+            captured["kwargs"] = kwargs
+            return [
+                {
+                    "page_index": 0,
+                    "seal_res": {
+                        "rec_texts": ["demo seal"],
+                        "rec_boxes": [[0, 0, 10, 10]],
+                    },
+                }
+            ]
+
+    monkeypatch.setattr(
+        paddle_table_module,
+        "_build_paddleocr_vl",
+        lambda options: _FakePaddleOCRVL(),
+    )
+
+    result = PaddleTableStructureService()._extract_with_paddleocr_vl(
+        file_uri="/workspace/input/demo.jpg",
+        output_dir=tmp_path,
+        target_page_sizes={0: ImageSize(width=100, height=100)},
+        options={},
+        mode="paddleocr_vl",
+    )
+
+    assert captured["input"] == "/workspace/input/demo.jpg"
+    assert captured["kwargs"]["use_queues"] is False
+    assert captured["kwargs"]["max_new_tokens"] == 2048
+    assert result.meta["provider"] == "paddleocr_vl"
+
+
+def test_paddle_auto_uses_ppocr_and_vl_seal_crop(
+    monkeypatch,  # noqa: ANN001
+    tmp_path: Path,
+) -> None:
+    ocr_block = TextBlock(
+        text="\u5168\u4f53\u6295\u8d44\u4eba\u7b7e\u5b57\uff08\u76d6\u7ae0\uff09\u7f57\u5efa",
+        bounding_box=BoundingBox(x=120, y=430, w=360, h=28),
+        block_type="text",
+        meta={"source": "paddleocr_ppocrv5"},
+    )
+    vl_block = TextBlock(
+        text="\u5fb7\u9633\u5efa\u946b\u5e02\u653f\u8bbe\u65bd\u7ba1\u7406\u6709\u9650\u8d23\u4efb\u516c\u53f8",
+        bounding_box=BoundingBox(x=637, y=598, w=209, h=146),
+        block_type="seal_text",
+        meta={"source": "paddleocr_vl_seal_crop", "image_uri": str(tmp_path / "images" / "seal.jpg")},
+    )
+
+    seal_block = TextBlock(
+        text="",
+        bounding_box=BoundingBox(x=637, y=598, w=209, h=146),
+        block_type="seal",
+        meta={"img_path": "images/seal.jpg"},
+    )
+
+    def fake_predict_layout_crop_text_blocks_with_ppocrv5(**kwargs):  # noqa: ANN001
+        return [{"page_index": 0}], {0: (ocr_block,)}, 1
+
+    def fake_predict_seal_crops_with_paddleocr_vl(**kwargs):  # noqa: ANN001
+        return {0: (vl_block,)}, 1, [{"page_index": 0, "text": vl_block.text}]
+
+    monkeypatch.setattr(
+        paddle_table_module,
+        "_predict_layout_crop_text_blocks_with_ppocrv5",
+        fake_predict_layout_crop_text_blocks_with_ppocrv5,
+    )
+    monkeypatch.setattr(
+        paddle_table_module,
+        "_predict_seal_crops_with_paddleocr_vl",
+        fake_predict_seal_crops_with_paddleocr_vl,
+    )
+
+    result = PaddleTableStructureService().extract_tables(
+        file_uri="/workspace/output/demo.converted.pdf",
+        output_dir=tmp_path,
+        target_page_sizes={0: ImageSize(width=900, height=1200)},
+        options={
+            "paddle_table_mode": "auto",
+            "source_input_uri": "/workspace/input/demo.jpg",
+        },
+        page_text_blocks_by_page={0: [seal_block]},
+    )
+
+    payload = json.loads((tmp_path / "paddle_table_structure.json").read_text(encoding="utf-8"))
+    assert result.meta["provider"] == "paddleocr_ppocrv5_paddleocr_vl_seal"
+    assert result.meta["replace_text_blocks"] is True
+    assert payload["mode"] == "seal_vl_crops_ppocrv5"
+    assert payload["text_blocks_by_page"]["0"][0]["text"] == ocr_block.text
+    assert payload["text_blocks_by_page"]["0"][1]["block_type"] == "seal_text"
+    assert payload["text_blocks_by_page"]["0"][1]["text"] == vl_block.text
 
 
 def test_parse_mineru_middle_json_preserves_mineru_table_output() -> None:
@@ -454,6 +800,72 @@ def test_merge_table_result_replaces_flat_table_text_by_default() -> None:
     assert page.table_blocks[0].cells[0].text == "new table text"
 
 
+def test_parse_paddle_ocr_text_blocks_extracts_ppocrv5_recognition() -> None:
+    blocks_by_page, count = parse_paddle_ocr_text_blocks(
+        [
+            {
+                "res": {
+                    "page_index": 0,
+                    "width": 100,
+                    "height": 100,
+                    "rec_texts": ["plain text"],
+                    "rec_scores": [0.92],
+                    "rec_polys": [[[10, 20], [50, 20], [50, 40], [10, 40]]],
+                }
+            }
+        ],
+        target_page_sizes={0: ImageSize(width=200, height=200)},
+        provider="paddleocr_ppocrv5",
+    )
+
+    assert count == 1
+    block = blocks_by_page[0][0]
+    assert block.text == "plain text"
+    assert block.bounding_box == BoundingBox(x=20, y=40, w=80, h=40)
+    assert block.meta["source"] == "paddleocr_ppocrv5"
+
+
+def test_merge_table_result_can_replace_text_blocks_without_tables() -> None:
+    middle_ref = ArtifactRef(kind="middle_json", uri="file:///tmp/middle.json")
+    original_block = TextBlock(
+        text="mineru old",
+        bounding_box=BoundingBox(x=0, y=0, w=10, h=10),
+    )
+    paddle_block = TextBlock(
+        text="paddle new",
+        bounding_box=BoundingBox(x=5, y=5, w=20, h=10),
+        meta={"source": "paddleocr_ppocrv5"},
+    )
+    parsed = MinerUDocumentParseResult(
+        pages=(
+            MinerUPageResult(
+                page_index=0,
+                text="mineru old",
+                text_blocks=(original_block,),
+                table_blocks=(),
+                image_size=ImageSize(width=100, height=100),
+            ),
+        ),
+        middle_json_ref=middle_ref,
+        page_count=1,
+    )
+
+    merged = _merge_table_result(
+        parsed,
+        PaddleTableStructureResult(
+            tables_by_page={},
+            text_blocks_by_page={0: (paddle_block,)},
+            meta={"provider": "paddleocr_ppocrv5", "replace_text_blocks": True},
+        ),
+        emit_text_blocks=False,
+        replace_existing_table_blocks=True,
+    )
+
+    assert [block.text for block in merged.pages[0].text_blocks] == ["paddle new"]
+    assert merged.pages[0].text == "paddle new"
+    assert merged.meta["table_cell_refine"]["provider"] == "paddleocr_ppocrv5"
+
+
 def test_layout_extract_mineru_operator_fans_out_document_into_pages() -> None:
     parsed = parse_mineru_middle_json(
         _sample_middle_json(),
@@ -590,8 +1002,42 @@ def test_layout_extract_mineru_paddle_table_operator_injects_defaults() -> None:
     assert service.options["enable_table_cell_refine"] is True
     assert service.options["table_cell_refine_when_tables_present"] is True
     assert service.options["table_cell_refine_fail_open"] is False
-    assert service.options["paddle_table_mode"] == "ppstructurev3"
+    assert service.options["paddle_table_mode"] == "auto"
     assert service.options["timeout_seconds"] == 1800.0
+
+
+def test_layout_extract_mineru_paddle_operator_respects_ocr_engine() -> None:
+    parsed = parse_mineru_middle_json(
+        _sample_middle_json(),
+        middle_json_uri="file:///tmp/example_middle.json",
+    )
+
+    class _CapturingService:
+        options: dict | None = None
+
+        def parse_document(self, *, file_uri, mime_type=None, options=None):  # noqa: ANN001
+            self.options = dict(options or {})
+            return parsed
+
+    service = _CapturingService()
+    op = LayoutExtractMinerUPaddleTableOperator(service=service)
+    ctx = OperatorContext(trace_id="trace-1", run_id="run-1")
+    document = DocumentItem(
+        archive_id="archive-1",
+        archive_owner_user_id="owner-1",
+        triggered_by_user_id="user-1",
+        doc_id="doc-1",
+        file_uri="file:///tmp/example.pdf",
+        meta={"mineru_options": {"table_engine": "ocr"}},
+    )
+
+    list(op.process(ctx, iter([document.model_dump(mode="python")]), path="item"))
+
+    assert service.options is not None
+    assert service.options["table_engine"] == "ocr"
+    assert service.options["enable_table_cell_refine"] is False
+    assert service.options["enable_paddle_table_refine"] is False
+    assert "paddle_table_mode" not in service.options
 
 
 def test_pure_mineru_options_default_to_ocr_table_engine() -> None:
@@ -614,6 +1060,48 @@ def test_pure_mineru_options_default_to_ocr_table_engine() -> None:
     assert options["enable_table_cell_refine"] is False
     assert options["enable_paddle_table_refine"] is False
     assert "paddle_table_mode" not in options
+
+
+def test_cleanup_mineru_api_task_dirs_removes_matching_uuid_upload(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    final_output_dir = output_root / "business" / "doc"
+    final_output_dir.mkdir(parents=True)
+    input_path = final_output_dir / "doc.converted.pdf"
+    input_path.write_bytes(b"%PDF-1.4\nconverted")
+
+    matching_task_dir = output_root / "1b985c48-168c-49bc-ba15-f39598a9d16e"
+    matching_upload_dir = matching_task_dir / "uploads"
+    matching_upload_dir.mkdir(parents=True)
+    (matching_upload_dir / input_path.name).write_bytes(input_path.read_bytes())
+    (matching_task_dir / "doc.converted" / "auto").mkdir(parents=True)
+
+    other_task_dir = output_root / "fdbc4967-d456-48bf-bd16-b5b88e3d44f4"
+    other_upload_dir = other_task_dir / "uploads"
+    other_upload_dir.mkdir(parents=True)
+    (other_upload_dir / input_path.name).write_bytes(b"different size")
+
+    cleaned = _cleanup_mineru_api_task_dirs(
+        input_path=input_path,
+        output_dir=final_output_dir,
+        started_at=0,
+    )
+
+    assert cleaned == (matching_task_dir,)
+    assert not matching_task_dir.exists()
+    assert other_task_dir.exists()
+    assert final_output_dir.exists()
+    assert input_path.exists()
+
+
+def test_cleanup_mineru_api_task_dirs_only_enabled_for_http_api() -> None:
+    assert _should_cleanup_mineru_api_task_dirs(options={}, api_url="http://127.0.0.1:8000")
+    assert not _should_cleanup_mineru_api_task_dirs(options={}, api_url=None)
+    assert not _should_cleanup_mineru_api_task_dirs(options={}, api_url="")
+    assert not _should_cleanup_mineru_api_task_dirs(options={}, api_url="file:///tmp/input.pdf")
+    assert not _should_cleanup_mineru_api_task_dirs(
+        options={"cleanup_api_task_dirs": False},
+        api_url="http://127.0.0.1:8000",
+    )
 
 
 class _FailingMinerUService:

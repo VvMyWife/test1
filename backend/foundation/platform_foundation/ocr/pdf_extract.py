@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from html.parser import HTMLParser
 import asyncio
 import csv
 import json
@@ -153,7 +154,7 @@ class MinerUPdfFileOperator:
         output_dir: str | Path,
         use_paddle_tables: bool | None = None,
         table_engine: str | None = None,
-        paddle_table_mode: str = "ppstructurev3",
+        paddle_table_mode: str = "auto",
         paddle_device: str | None = None,
         source_file_name: str | None = None,
         overwrite: bool = True,
@@ -212,6 +213,8 @@ class MinerUPdfFileOperator:
                     "parse_method": self.parse_method,
                     "lang": self.lang,
                     "extra_args": resolved_extra_args,
+                    "source_input_uri": str(resolved_input),
+                    "source_input_type": input_type,
                 }
             )
             if resolved_table_engine == "paddle":
@@ -239,6 +242,7 @@ class MinerUPdfFileOperator:
                 artifact_dir=artifact_dir,
                 mineru_pdf_path=pdf_for_mineru,
             )
+            _normalize_markdown_artifacts(artifact_dir)
             artifacts = list(parsed.artifacts)
             if converted_pdf_path is not None:
                 artifacts.append(
@@ -437,7 +441,7 @@ class MinerUPdfDirBatchOperator:
         enable_page_screenshots: bool = False,
         page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI,
         field_keywords: Sequence[str] | str | None = None,
-        paddle_table_mode: str = "ppstructurev3",
+        paddle_table_mode: str = "auto",
         paddle_device: str | None = None,
         engine: str = "auto",
         lock_acquire_timeout_seconds: float = 3600.0,
@@ -1482,6 +1486,602 @@ def _flatten_mineru_output_dir(result: Any, *, artifact_dir: Path, mineru_pdf_pa
     except OSError:
         pass
     return _rewrite_model_path_prefixes(result, relocations)
+
+
+def _normalize_markdown_artifacts(artifact_dir: Path) -> None:
+    for markdown_path in artifact_dir.glob("*.md"):
+        try:
+            markdown = markdown_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        normalized = _replace_html_tables_with_text(markdown)
+        normalized = _replace_markdown_with_paddle_text_if_available(markdown_path, normalized)
+        normalized = _merge_markdown_peripheral_text(markdown_path, normalized)
+        normalized = _append_markdown_seal_section(markdown_path, normalized)
+        if normalized != markdown:
+            markdown_path.write_text(normalized, encoding="utf-8")
+
+
+def _replace_html_tables_with_text(markdown: str) -> str:
+    return re.sub(
+        r"<table\b[^>]*>.*?</table>",
+        lambda match: "\n\n" + _html_table_to_text(match.group(0), context_text=markdown) + "\n\n",
+        markdown,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
+def _replace_markdown_with_paddle_text_if_available(markdown_path: Path, markdown: str) -> str:
+    artifact_path = markdown_path.with_name("paddle_table_structure.json")
+    if not artifact_path.exists():
+        return markdown
+    try:
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return markdown
+    if not isinstance(payload, Mapping):
+        return markdown
+
+    provider = str(payload.get("provider") or "")
+    mode = str(payload.get("mode") or "")
+    if provider != "paddleocr_ppocrv5_paddleocr_vl_seal" and mode != "seal_vl_crops_ppocrv5":
+        return markdown
+
+    lines = _paddle_markdown_body_lines(payload)
+    if not lines:
+        return markdown
+    return "\n\n".join(lines).strip() + "\n"
+
+
+def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
+    text_blocks_by_page = payload.get("text_blocks_by_page")
+    if not isinstance(text_blocks_by_page, Mapping):
+        return []
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for _, raw_blocks in sorted(
+        text_blocks_by_page.items(),
+        key=lambda item: _safe_int(item[0]),
+    ):
+        if not isinstance(raw_blocks, list):
+            continue
+        blocks = [
+            block
+            for block in raw_blocks
+            if isinstance(block, Mapping)
+            and str(block.get("block_type") or "").strip().lower() != "seal_text"
+        ]
+        blocks.sort(key=lambda block: _markdown_block_sort_key(block))
+        for block in blocks:
+            text = _normalize_markdown_body_line(str(block.get("text") or ""))
+            if not text:
+                continue
+            dedupe_key = _normalize_markdown_body_line(text)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            lines.append(text)
+    return lines
+
+
+def _markdown_block_sort_key(block: Mapping[str, Any]) -> tuple[int, int]:
+    bbox = block.get("bounding_box")
+    if not isinstance(bbox, Mapping):
+        return (0, 0)
+    return (_safe_int(bbox.get("y")), _safe_int(bbox.get("x")))
+
+
+def _normalize_markdown_body_line(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
+    normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
+    normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
+    return normalized
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_markdown_peripheral_text(markdown_path: Path, markdown: str) -> str:
+    content_list_path = markdown_path.with_name(f"{markdown_path.stem}_content_list.json")
+    if not content_list_path.exists():
+        return markdown
+    try:
+        payload = json.loads(content_list_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return markdown
+
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        raw_items = payload.get("content_list") or payload.get("items")
+        items = raw_items if isinstance(raw_items, list) else []
+    else:
+        items = []
+
+    headers = _extract_peripheral_lines(items, item_types={"header", "page_header"})
+    footers = _extract_peripheral_lines(items, item_types={"footer", "page_footer", "page_number"})
+
+    header_lines = [line for line in headers if line and line not in markdown]
+    footer_lines = [line for line in footers if line and line not in markdown]
+    if not header_lines and not footer_lines:
+        return markdown
+
+    pieces: list[str] = []
+    if header_lines:
+        pieces.append("\n".join(header_lines))
+    pieces.append(markdown.strip("\n"))
+    if footer_lines:
+        pieces.append("\n".join(footer_lines))
+    return "\n\n".join(piece for piece in pieces if piece) + "\n"
+
+
+def _append_markdown_seal_section(markdown_path: Path, markdown: str) -> str:
+    seal_lines = _collect_markdown_seal_lines(markdown_path)
+    if not seal_lines:
+        return markdown
+
+    inline_seal_lines = _collect_inline_markdown_seal_lines(markdown_path)
+    body = _strip_existing_markdown_seal_section(markdown)
+    body = _strip_inline_markdown_seal_content(
+        body,
+        seal_lines=[*seal_lines, *inline_seal_lines],
+        seal_image_paths=_collect_markdown_seal_image_paths(markdown_path),
+    )
+    section = "\u5370\u7ae0\uff1a\n\n" + "\n\n".join(seal_lines)
+    return body.strip("\n") + "\n\n" + section + "\n"
+
+
+def _strip_existing_markdown_seal_section(markdown: str) -> str:
+    match = re.search(r"(?:^|\n{2,})\s*\u5370\u7ae0[:\uff1a]\s*\n.*\Z", markdown, flags=re.DOTALL)
+    if match is None:
+        return markdown
+    return markdown[: match.start()]
+
+
+def _collect_markdown_seal_lines(markdown_path: Path) -> list[str]:
+    paddle_artifact_path = markdown_path.with_name("paddle_table_structure.json")
+    paddle_lines = _dedupe_markdown_seal_lines(
+        _collect_seal_lines_from_json_file(paddle_artifact_path)
+    )
+    if paddle_lines:
+        return paddle_lines
+
+    candidates: list[str] = []
+
+    content_list_path = markdown_path.with_name(f"{markdown_path.stem}_content_list.json")
+    candidates.extend(_collect_seal_lines_from_json_file(content_list_path))
+
+    content_list_v2_path = markdown_path.with_name(f"{markdown_path.stem}_content_list_v2.json")
+    candidates.extend(_collect_seal_lines_from_json_file(content_list_v2_path))
+
+    return _dedupe_markdown_seal_lines(candidates)
+
+
+def _collect_inline_markdown_seal_lines(markdown_path: Path) -> list[str]:
+    candidates: list[str] = []
+    for path in (
+        markdown_path.with_name(f"{markdown_path.stem}_content_list.json"),
+        markdown_path.with_name(f"{markdown_path.stem}_content_list_v2.json"),
+    ):
+        candidates.extend(_collect_seal_lines_from_json_file(path))
+    return _dedupe_markdown_seal_lines(candidates)
+
+
+def _dedupe_markdown_seal_lines(candidates: Sequence[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        text = _normalize_markdown_seal_text(candidate)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _collect_markdown_seal_image_paths(markdown_path: Path) -> list[str]:
+    image_paths: list[str] = []
+    for path in (
+        markdown_path.with_name(f"{markdown_path.stem}_content_list.json"),
+        markdown_path.with_name(f"{markdown_path.stem}_content_list_v2.json"),
+    ):
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        _collect_seal_image_paths_from_json(payload, image_paths)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for image_path in image_paths:
+        normalized = str(image_path or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _collect_seal_image_paths_from_json(value: Any, image_paths: list[str]) -> None:
+    if isinstance(value, Mapping):
+        if _json_mapping_is_seal(value):
+            for key in ("img_path", "image_path", "image_uri"):
+                image_path = value.get(key)
+                if image_path is not None:
+                    image_paths.append(str(image_path))
+        for item in value.values():
+            _collect_seal_image_paths_from_json(item, image_paths)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_seal_image_paths_from_json(item, image_paths)
+
+
+def _strip_inline_markdown_seal_content(
+    markdown: str,
+    *,
+    seal_lines: Sequence[str],
+    seal_image_paths: Sequence[str],
+) -> str:
+    seal_texts = {_normalize_markdown_seal_text(line) for line in seal_lines if line}
+    image_tokens = {
+        token
+        for image_path in seal_image_paths
+        for token in (str(image_path).strip(), Path(str(image_path)).name)
+        if token
+    }
+    if not seal_texts and not image_tokens:
+        return markdown
+
+    kept_lines: list[str] = []
+    for line in markdown.splitlines():
+        if _markdown_line_is_seal_image(line, image_tokens):
+            continue
+        if _normalize_markdown_seal_text(line) in seal_texts:
+            continue
+        kept_lines.append(line)
+    stripped = "\n".join(kept_lines)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped + ("\n" if markdown.endswith("\n") else "")
+
+
+def _markdown_line_is_seal_image(line: str, image_tokens: set[str]) -> bool:
+    if not image_tokens:
+        return False
+    match = re.fullmatch(r"\s*!\[[^\]]*]\(([^)]+)\)\s{0,2}\s*", line)
+    if match is None:
+        return False
+    target = match.group(1).strip()
+    return any(token and (target == token or target.endswith(token)) for token in image_tokens)
+
+
+def _collect_seal_lines_from_json_file(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    lines: list[str] = []
+    _collect_seal_lines_from_json(payload, lines)
+    return lines
+
+
+def _collect_seal_lines_from_json(value: Any, lines: list[str]) -> None:
+    if isinstance(value, Mapping):
+        if _json_mapping_is_seal(value):
+            for text in _extract_json_mapping_texts(value):
+                lines.append(text)
+
+        for key in ("seal_res", "seal_ocr_res"):
+            nested = value.get(key)
+            if isinstance(nested, Mapping):
+                for text in _extract_json_mapping_texts(nested):
+                    lines.append(text)
+
+        for item in value.values():
+            _collect_seal_lines_from_json(item, lines)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_seal_lines_from_json(item, lines)
+
+
+def _json_mapping_is_seal(value: Mapping[str, Any]) -> bool:
+    for key in ("type", "block_type", "label", "block_label"):
+        token = value.get(key)
+        if token is not None and _value_has_markdown_seal_hint(token):
+            return True
+    meta = value.get("meta")
+    return isinstance(meta, Mapping) and any(
+        _value_has_markdown_seal_hint(item) for item in meta.values()
+    )
+
+
+def _extract_json_mapping_texts(value: Mapping[str, Any]) -> list[str]:
+    texts: list[str] = []
+    for key in ("text", "content", "block_content", "markdown", "markdown_text"):
+        text = _extract_json_text_value(value.get(key))
+        if text:
+            texts.append(text)
+
+    rec_texts = value.get("rec_texts")
+    if isinstance(rec_texts, list):
+        texts.extend(str(item) for item in rec_texts if item is not None)
+    return texts
+
+
+def _extract_json_text_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    if isinstance(value, Mapping):
+        fragments: list[str] = []
+        _collect_nested_content_text(value, fragments)
+        return " ".join(fragments)
+    if isinstance(value, list):
+        fragments = []
+        for item in value:
+            if isinstance(item, Mapping):
+                _collect_nested_content_text(item, fragments)
+            elif item is not None:
+                fragments.append(str(item))
+        return " ".join(fragments)
+    return str(value)
+
+
+def _value_has_markdown_seal_hint(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return any(token in text for token in ("seal", "stamp", "\u5370\u7ae0", "\u516c\u7ae0", "\u76d6\u7ae0"))
+
+
+def _normalize_markdown_seal_text(text: str) -> str:
+    normalized = re.sub(r"<[^>]+>", " ", str(text or ""))
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"^\u5370\u7ae0[:\uff1a]\s*", "", normalized)
+    return normalized.strip()
+
+
+def _extract_peripheral_lines(items: Sequence[Any], *, item_types: set[str]) -> list[str]:
+    candidates: list[tuple[float, float, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip().lower()
+        if item_type not in item_types:
+            continue
+        text = _extract_content_list_text(item)
+        if not text:
+            continue
+        bbox = item.get("bbox")
+        x0 = _coerce_bbox_value(bbox, 0)
+        y0 = _coerce_bbox_value(bbox, 1)
+        candidates.append((y0, x0, text))
+    if not candidates:
+        return []
+
+    lines: list[list[tuple[float, str]]] = []
+    line_ys: list[float] = []
+    for y0, x0, text in sorted(candidates, key=lambda item: (item[0], item[1])):
+        if not lines or abs(y0 - line_ys[-1]) > 16:
+            lines.append([(x0, text)])
+            line_ys.append(y0)
+        else:
+            lines[-1].append((x0, text))
+            line_ys[-1] = (line_ys[-1] + y0) / 2.0
+
+    rendered: list[str] = []
+    for line in lines:
+        texts = [text for _, text in sorted(line, key=lambda item: item[0])]
+        joined = " | ".join(texts)
+        if joined:
+            rendered.append(joined)
+    return rendered
+
+
+def _extract_content_list_text(item: Mapping[str, Any]) -> str:
+    text = item.get("text")
+    if text is None:
+        text = item.get("content")
+    if isinstance(text, Mapping):
+        fragments: list[str] = []
+        _collect_nested_content_text(text, fragments)
+        text = " ".join(fragments)
+    elif isinstance(text, list):
+        fragments = []
+        for value in text:
+            if isinstance(value, Mapping):
+                _collect_nested_content_text(value, fragments)
+            elif value is not None:
+                fragments.append(str(value))
+        text = " ".join(fragments)
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _collect_nested_content_text(value: Any, fragments: list[str]) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key in {"text", "content"} and not isinstance(item, (Mapping, list)):
+                if item is not None:
+                    fragments.append(str(item))
+            else:
+                _collect_nested_content_text(item, fragments)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_nested_content_text(item, fragments)
+
+
+def _coerce_bbox_value(bbox: Any, index: int) -> float:
+    if isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes)) and len(bbox) > index:
+        try:
+            return float(bbox[index])
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _html_table_to_text(html: str, *, context_text: str | None = None) -> str:
+    parser = _PlainHtmlTableParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", html)
+    rows: list[list[str]] = []
+    for row in parser.rows:
+        cells = [_normalize_markdown_table_cell(cell) for cell in row]
+        if any(cells):
+            rows.append(cells)
+    _repair_contextual_markdown_table_cells(rows, context_text=context_text)
+    return _render_markdown_table(rows)
+
+
+class _PlainHtmlTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._current_row: list[str] | None = None
+        self._current_cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.lower()
+        if normalized == "tr":
+            self._current_row = []
+        elif normalized in {"td", "th"}:
+            if self._current_row is None:
+                self._current_row = []
+            self._current_cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell is not None:
+            self._current_cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.lower()
+        if normalized in {"td", "th"} and self._current_cell is not None:
+            text = re.sub(r"\s+", " ", "".join(self._current_cell)).strip()
+            if self._current_row is None:
+                self._current_row = []
+            self._current_row.append(text)
+            self._current_cell = None
+        elif normalized == "tr" and self._current_row is not None:
+            self.rows.append(self._current_row)
+            self._current_row = None
+
+
+def _render_markdown_table(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
+    if width <= 1:
+        return "\n".join(row[0] for row in normalized_rows if row[0])
+    header = normalized_rows[0]
+    separator = ["---"] * width
+    body = normalized_rows[1:]
+    lines = [
+        "| " + " | ".join(_escape_markdown_table_cell(cell) for cell in header) + " |",
+        "| " + " | ".join(separator) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(_escape_markdown_table_cell(cell) for cell in row) + " |"
+        for row in body
+    )
+    return "\n".join(lines)
+
+
+def _escape_markdown_table_cell(cell: str) -> str:
+    return cell.replace("|", r"\|")
+
+
+def _normalize_markdown_table_cell(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
+    normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
+    normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
+    return _extract_markdown_context_date(normalized) or normalized
+
+
+def _repair_contextual_markdown_table_cells(rows: list[list[str]], *, context_text: str | None) -> None:
+    if len(rows) < 2:
+        return
+    context_date = _extract_markdown_context_date(context_text or "")
+    if not context_date:
+        return
+    headers = rows[0]
+    time_columns = [
+        index
+        for index, header in enumerate(headers)
+        if "\u8ba4\u8bc1\u65f6\u95f4" in header or "\u5b9e\u540d\u8ba4\u8bc1\u65f6\u95f4" in header
+    ]
+    for col_index in time_columns:
+        values = [row[col_index] for row in rows[1:] if col_index < len(row)]
+        if not any(_looks_like_markdown_date_fragment(value) for value in values):
+            continue
+        for row in rows[1:]:
+            if col_index >= len(row):
+                continue
+            cell_date = _extract_markdown_context_date(row[col_index])
+            if cell_date:
+                row[col_index] = cell_date
+            elif not row[col_index] or _looks_like_markdown_date_fragment(row[col_index]):
+                row[col_index] = context_date
+
+
+def _looks_like_markdown_date_fragment(value: str) -> bool:
+    text = _normalize_markdown_table_cell_without_date(value)
+    if not text:
+        return False
+    if _extract_markdown_context_date(text):
+        return True
+    if any(token in text for token in ("\u5e74", "\u6708", "\u65e5")):
+        return True
+    return bool(re.fullmatch(r"[\dHh/\-. ]{1,10}", text))
+
+
+def _normalize_markdown_table_cell_without_date(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
+    normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
+    normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
+    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
+    return normalized
+
+
+def _extract_markdown_context_date(text: str) -> str | None:
+    value = str(text or "")
+    match = re.search(
+        r"((?:19|20)\d{2})\s*[\u5e74/-]\s*(\d{1,2})\s*[\u6708/-]\s*(\d{1,2})\s*\u65e5?",
+        value,
+    )
+    if match:
+        return f"{match.group(1)}\u5e74{int(match.group(2))}\u6708{int(match.group(3))}\u65e5"
+
+    serial_match = re.search(
+        r"\u4e1a\u52a1\u6d41\u6c34\u53f7[:\uff1a]?\S*?((?:19|20)\d{2})(\d{2})(\d{2})",
+        value,
+    )
+    if serial_match:
+        return (
+            f"{serial_match.group(1)}\u5e74"
+            f"{int(serial_match.group(2))}\u6708{int(serial_match.group(3))}\u65e5"
+        )
+    exact_match = re.fullmatch(r"\s*((?:19|20)\d{2})(\d{2})(\d{2})\s*", value)
+    if exact_match:
+        return (
+            f"{exact_match.group(1)}\u5e74"
+            f"{int(exact_match.group(2))}\u6708{int(exact_match.group(3))}\u65e5"
+        )
+    return None
 
 
 def _mineru_output_relocations(old_root: Path, new_root: Path) -> list[tuple[Path, Path]]:
