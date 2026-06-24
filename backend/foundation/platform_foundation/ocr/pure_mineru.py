@@ -45,7 +45,7 @@ class MinerUPdfResult(BaseModel):
 
 
 def extract_pdf(
-    pdf_path: str | Path,
+    input_path: str | Path,
     *,
     output_dir: str | Path | None = None,
     api_url: str | None = None,
@@ -60,9 +60,9 @@ def extract_pdf(
     mineru_options: Mapping[str, Any] | None = None,
     operator_factory: Callable[[], LayoutExtractMinerUOperator] = LayoutExtractMinerUPaddleTableOperator,
 ) -> MinerUPdfResult:
-    """Extract one local PDF and return a business-field-free MinerU result."""
+    """Extract one local file (PDF, PNG, JPG, BMP, TIFF) and return a business-field-free MinerU result."""
 
-    resolved_pdf = Path(pdf_path).expanduser().resolve()
+    resolved_input = Path(input_path).expanduser().resolve()
     options = _build_mineru_options(
         output_dir=output_dir,
         api_url=api_url,
@@ -76,9 +76,9 @@ def extract_pdf(
         paddle_device=paddle_device,
         mineru_options=mineru_options,
     )
-    document = _build_internal_document(resolved_pdf, mineru_options=options)
+    document = _build_internal_document(resolved_input, mineru_options=options)
     result = operate(document, mineru_options=options, operator_factory=operator_factory)
-    return to_pure_mineru_result(result, source_pdf=resolved_pdf)
+    return to_pure_mineru_result(result, source_pdf=resolved_input)
 
 
 def to_pure_mineru_result(
@@ -86,15 +86,15 @@ def to_pure_mineru_result(
     *,
     source_pdf: str | Path,
 ) -> MinerUPdfResult:
-    resolved_pdf = Path(source_pdf).expanduser().resolve()
+    resolved_source = Path(source_pdf).expanduser().resolve()
     return MinerUPdfResult(
-        source_pdf=str(resolved_pdf),
-        source_file_name=resolved_pdf.name,
+        source_pdf=str(resolved_source),
+        source_file_name=resolved_source.name,
         page_count=result.page_count,
         coord_space=result.coord_space,
         layout_ref=result.layout_ref,
         artifacts=result.artifacts,
-        parsed_pdf=result.parsed_pdf.model_copy(update={"pdf_path": str(resolved_pdf)}),
+        parsed_pdf=result.parsed_pdf.model_copy(update={"pdf_path": str(resolved_source)}),
         pages=[
             MinerUPdfPage(
                 page_index=page.page_index,
@@ -169,23 +169,38 @@ def _resolve_api_url(api_url: str | None) -> str:
 
 
 def _build_internal_document(
-    pdf_path: Path,
+    input_path: Path,
     *,
     mineru_options: Mapping[str, Any],
 ) -> DocumentItem:
-    doc_id = _safe_doc_id(pdf_path)
+    doc_id = _safe_doc_id(input_path)
     return DocumentItem(
         archive_id="mineru",
         archive_owner_user_id="mineru",
         triggered_by_user_id="mineru",
         doc_id=doc_id,
-        file_uri=str(pdf_path),
-        mime_type="application/pdf",
+        file_uri=str(input_path),
+        mime_type=_resolve_mime_type(input_path),
         meta={"source": "pure_mineru", "mineru_options": dict(mineru_options)},
     )
 
 
-def _safe_doc_id(pdf_path: Path) -> str:
-    stem = pdf_path.stem.strip() or pdf_path.name
+def _resolve_mime_type(file_path: Path) -> str:
+    """Map file suffix to standard MIME type for MinerU processing."""
+    suffix = file_path.suffix.lower()
+    _MIME_MAP: dict[str, str] = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".bmp": "image/bmp",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+    }
+    return _MIME_MAP.get(suffix, "application/octet-stream")
+
+
+def _safe_doc_id(file_path: Path) -> str:
+    stem = file_path.stem.strip() or file_path.name
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._")
     return safe or "document"

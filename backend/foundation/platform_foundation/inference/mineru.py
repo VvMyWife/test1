@@ -160,13 +160,6 @@ class MinerUCliDocumentService:
         options: Mapping[str, Any] | None = None,
     ) -> MinerUDocumentParseResult:
         resolved_file = _coerce_local_file_path(file_uri)
-        if resolved_file.suffix.lower() != ".pdf":
-            raise MinerUServiceError(
-                "MinerU CLI currently expects a local PDF path",
-                code="MINERU_UNSUPPORTED_INPUT",
-                retryable=False,
-                details={"file_uri": file_uri, "mime_type": mime_type},
-            )
 
         opts = dict(options or {})
         output_dir = _prepare_output_dir(self.config.output_root, opts.get("output_dir"))
@@ -967,7 +960,7 @@ def _coerce_local_file_path(file_uri: str) -> Path:
         path = Path(file_uri).expanduser().resolve()
         if not path.exists():
             raise MinerUServiceError(
-                f"Input PDF does not exist: {file_uri}",
+                f"Input file does not exist: {file_uri}",
                 code="MINERU_INPUT_NOT_FOUND",
                 retryable=False,
             )
@@ -984,7 +977,7 @@ def _coerce_local_file_path(file_uri: str) -> Path:
         path = Path(raw_path).expanduser().resolve()
         if not path.exists():
             raise MinerUServiceError(
-                f"Input PDF does not exist: {file_uri}",
+                f"Input file does not exist: {file_uri}",
                 code="MINERU_INPUT_NOT_FOUND",
                 retryable=False,
             )
@@ -992,7 +985,7 @@ def _coerce_local_file_path(file_uri: str) -> Path:
 
     raise MinerUServiceError(
         "MinerU CLI only supports local file paths or file:// URIs",
-        code="MINERU_UNSUPPORTED_INPUT",
+        code="MINERU_UNSUPPORTED_INPUT_SCHEME",
         retryable=False,
         details={"file_uri": file_uri},
     )

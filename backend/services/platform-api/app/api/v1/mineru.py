@@ -106,7 +106,7 @@ def _parse_json_dict_field(raw_value: str | None, *, field_name: str) -> dict:
 def _build_target_filename(*, index: int, upload: UploadFile) -> str:
     original_name = Path(upload.filename or f"upload-{index + 1}.pdf").name
     suffix = Path(original_name).suffix.lower()
-    if suffix != ".pdf":
+    if suffix not in {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
         original_name = f"{Path(original_name).stem or f'upload-{index + 1}'}.pdf"
     return f"{index + 1:03d}-{original_name}"
 

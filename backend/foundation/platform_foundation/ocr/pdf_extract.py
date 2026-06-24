@@ -190,7 +190,7 @@ class MinerUPdfFileOperator:
 
         started = time.perf_counter()
         input_type = "pdf"
-        converted_pdf_path: Path | None = None
+        converted_pdf_path: str | None = None
         page_screenshots_manifest: str | None = None
         resolved_field_keywords = _normalize_field_keywords(field_keywords)
         field_coordinates_path: str | None = None
@@ -198,12 +198,9 @@ class MinerUPdfFileOperator:
         field_match_count = 0
         try:
             self._validate_input_path(resolved_input)
-            pdf_for_mineru = resolved_input
+            input_for_mineru = resolved_input
             if _is_image_file(resolved_input):
                 input_type = "image"
-                converted_pdf_path = artifact_dir / f"{output_stem}.converted.pdf"
-                _convert_image_to_pdf(resolved_input, converted_pdf_path)
-                pdf_for_mineru = converted_pdf_path
 
             options = dict(mineru_options or {})
             options.update(
@@ -215,6 +212,7 @@ class MinerUPdfFileOperator:
                     "extra_args": resolved_extra_args,
                     "source_input_uri": str(resolved_input),
                     "source_input_type": input_type,
+                    "source_input_mime_type": _resolve_input_mime_type(resolved_input),
                 }
             )
             if resolved_table_engine == "paddle":
@@ -223,7 +221,7 @@ class MinerUPdfFileOperator:
                 options["paddle_device"] = paddle_device
 
             parsed = extract_pdf(
-                pdf_for_mineru,
+                input_for_mineru,
                 output_dir=artifact_dir,
                 api_url=self.api_url,
                 timeout_seconds=self.timeout_seconds,
@@ -240,28 +238,17 @@ class MinerUPdfFileOperator:
             parsed = _flatten_mineru_output_dir(
                 parsed,
                 artifact_dir=artifact_dir,
-                mineru_pdf_path=pdf_for_mineru,
+                mineru_pdf_path=input_for_mineru,
             )
             _normalize_markdown_artifacts(artifact_dir)
             artifacts = list(parsed.artifacts)
-            if converted_pdf_path is not None:
-                artifacts.append(
-                    ArtifactRef(
-                        kind="converted_pdf",
-                        uri=str(converted_pdf_path),
-                        meta={
-                            "source_path": str(resolved_input),
-                            "source_file_name": resolved_source_name,
-                            "source_type": input_type,
-                        },
-                    )
-                )
             if enable_page_screenshots:
-                screenshot_artifact = _render_pdf_page_screenshots(
-                    pdf_for_mineru,
+                screenshot_artifact = _render_input_page_screenshots(
+                    input_for_mineru,
                     output_dir=artifact_dir / "page_screenshots",
                     page_count=parsed.page_count,
                     dpi=page_screenshot_dpi,
+                    input_type=input_type,
                 )
                 artifacts.append(screenshot_artifact)
                 page_screenshots_manifest = screenshot_artifact.uri
@@ -270,7 +257,7 @@ class MinerUPdfFileOperator:
                     parsed,
                     keywords=resolved_field_keywords,
                     source_pdf_path=resolved_input,
-                    annotation_pdf_path=pdf_for_mineru,
+                    annotation_pdf_path=input_for_mineru,
                     output_dir=artifact_dir,
                     output_stem=output_stem,
                     table_engine=resolved_table_engine,
@@ -316,7 +303,7 @@ class MinerUPdfFileOperator:
                 mineru_extra_args=resolved_extra_args,
                 api_url=self.api_url,
                 input_type=input_type,
-                converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
+                converted_pdf_path=converted_pdf_path,
                 page_screenshots_manifest=page_screenshots_manifest,
                 field_keywords=resolved_field_keywords,
                 field_match_count=field_match_count,
@@ -347,7 +334,7 @@ class MinerUPdfFileOperator:
                 mineru_extra_args=resolved_extra_args,
                 api_url=self.api_url,
                 input_type=input_type,
-                converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
+                converted_pdf_path=converted_pdf_path,
                 page_screenshots_manifest=page_screenshots_manifest,
                 field_keywords=resolved_field_keywords,
                 field_match_count=field_match_count,
@@ -1140,7 +1127,30 @@ def _is_image_file(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
 
 
+def _resolve_input_mime_type(file_path: Path) -> str:
+    """Map file suffix to standard MIME type."""
+    suffix = file_path.suffix.lower()
+    _MIME_MAP: dict[str, str] = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".bmp": "image/bmp",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+    }
+    return _MIME_MAP.get(suffix, "application/octet-stream")
+
+
 def _convert_image_to_pdf(image_path: Path, output_pdf_path: Path) -> None:
+    """Convert a single image to PDF via Pillow.
+
+    .. deprecated::
+        Images are now passed directly to MinerU without intermediate PDF
+        conversion.  This function is kept as an explicit opt-in fallback for
+        callers that genuinely need a PDF wrapper (e.g. third-party tools
+        that only accept PDF).
+    """
     try:
         from PIL import Image, ImageOps
     except ModuleNotFoundError as exc:
@@ -2128,13 +2138,20 @@ def _rewrite_path_string(value: str, relocations: list[tuple[Path, Path]]) -> st
     return value
 
 
-def _render_pdf_page_screenshots(
-    pdf_path: Path,
+def _render_input_page_screenshots(
+    input_path: Path,
     *,
     output_dir: Path,
     page_count: int,
     dpi: int,
+    input_type: str = "pdf",
 ) -> ArtifactRef:
+    """Render page screenshots for PDF or image inputs.
+
+    For PDFs: uses pdftoppm to render each page at the requested DPI.
+    For images: copies the image itself as the single-page screenshot (no
+    extra rasterization — the image IS the page).
+    """
     if page_count <= 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = output_dir / "page_manifest.jsonl"
@@ -2142,16 +2159,23 @@ def _render_pdf_page_screenshots(
         return ArtifactRef(
             kind="page_screenshots_manifest",
             uri=str(manifest_path),
-            meta={"page_count": 0, "dpi": dpi},
+            meta={"page_count": 0, "dpi": dpi, "input_type": input_type},
         )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "page_manifest.jsonl"
+
+    if input_type == "image":
+        return _render_image_screenshot(
+            input_path, output_dir=output_dir, manifest_path=manifest_path
+        )
+
     if dpi <= 0:
         raise ValueError("page_screenshot_dpi must be greater than 0")
     pdftoppm = shutil.which("pdftoppm")
     if pdftoppm is None:
         raise RuntimeError("pdftoppm is required for page screenshot export")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "page_manifest.jsonl"
     manifest_rows: list[dict[str, Any]] = []
     for page_number in range(1, page_count + 1):
         prefix = output_dir / f"page_{page_number:04d}"
@@ -2167,7 +2191,7 @@ def _render_pdf_page_screenshots(
             str(dpi),
             "-png",
             "-singlefile",
-            str(pdf_path),
+            str(input_path),
             str(prefix),
         ]
         completed = subprocess.run(command, text=True, capture_output=True, check=False)
@@ -2184,7 +2208,7 @@ def _render_pdf_page_screenshots(
                 "page_index": page_number - 1,
                 "page_number": page_number,
                 "image_path": str(png_path),
-                "source_pdf": str(pdf_path),
+                "source_pdf": str(input_path),
                 "dpi": dpi,
                 "width": width,
                 "height": height,
@@ -2197,8 +2221,49 @@ def _render_pdf_page_screenshots(
     return ArtifactRef(
         kind="page_screenshots_manifest",
         uri=str(manifest_path),
-        meta={"page_count": page_count, "dpi": dpi, "output_dir": str(output_dir)},
+        meta={"page_count": page_count, "dpi": dpi, "output_dir": str(output_dir), "input_type": input_type},
     )
+
+
+def _render_image_screenshot(
+    image_path: Path,
+    *,
+    output_dir: Path,
+    manifest_path: Path,
+) -> ArtifactRef:
+    """Use the original image as the single-page screenshot — no re-rendering."""
+    suffix = image_path.suffix.lower()
+    dest_path = output_dir / f"page_0001{suffix}"
+    _unlink_if_exists(dest_path)
+    shutil.copy2(str(image_path), str(dest_path))
+    width, height = _read_image_size(dest_path)
+    manifest_rows = [
+        {
+            "page_index": 0,
+            "page_number": 1,
+            "image_path": str(dest_path),
+            "source_file": str(image_path),
+            "dpi": None,
+            "width": width,
+            "height": height,
+            "note": "original_image_copied_as_screenshot",
+        }
+    ]
+    manifest_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in manifest_rows),
+        encoding="utf-8",
+    )
+    return ArtifactRef(
+        kind="page_screenshots_manifest",
+        uri=str(manifest_path),
+        meta={"page_count": 1, "input_type": "image", "output_dir": str(output_dir)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible alias kept so external callers don't break
+# ---------------------------------------------------------------------------
+_render_pdf_page_screenshots = _render_input_page_screenshots
 
 
 def _read_image_size(image_path: Path) -> tuple[int | None, int | None]:

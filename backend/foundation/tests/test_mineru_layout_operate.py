@@ -260,7 +260,8 @@ def test_extract_pdf_file_can_export_field_coordinates_and_annotation_pdf(
     assert "field_annotation_pdf" in artifact_kinds
 
 
-def test_extract_pdf_file_accepts_image_and_converts_to_pdf(tmp_path: Path) -> None:
+def test_extract_pdf_file_accepts_image_and_passes_directly(tmp_path: Path) -> None:
+    """Images are now passed directly to MinerU — no intermediate PDF conversion."""
     from PIL import Image
 
     image_path = tmp_path / "input" / "photo.jpg"
@@ -271,7 +272,8 @@ def test_extract_pdf_file_accepts_image_and_converts_to_pdf(tmp_path: Path) -> N
     class _FakeOperator:
         def process(self, ctx, items, path):  # noqa: ANN001
             document = next(items)
-            assert document["file_uri"].endswith(".converted.pdf")
+            # Image is passed directly — file_uri should be the original .jpg
+            assert document["file_uri"].endswith(".jpg")
             yield PageItem(
                 archive_id=document["archive_id"],
                 archive_owner_user_id=document["archive_owner_user_id"],
@@ -294,13 +296,13 @@ def test_extract_pdf_file_accepts_image_and_converts_to_pdf(tmp_path: Path) -> N
 
     assert result.success is True
     assert result.input_type == "image"
-    assert result.converted_pdf_path is not None
-    assert Path(result.converted_pdf_path).exists()
+    assert result.converted_pdf_path is None  # No longer converted
     assert Path(result.json_path or "").name == "photo.json"
     payload = json.loads(Path(result.json_path or "").read_text(encoding="utf-8"))
     assert payload["source_pdf"] == str(image_path.resolve())
     assert payload["source_file_name"] == "photo.jpg"
-    assert any(artifact["kind"] == "converted_pdf" for artifact in payload["artifacts"])
+    # converted_pdf artifact is no longer emitted for images
+    assert not any(artifact["kind"] == "converted_pdf" for artifact in payload["artifacts"])
 
 
 def test_extract_pdf_file_flattens_mineru_pdf_artifact_dir(tmp_path: Path) -> None:
@@ -348,7 +350,8 @@ def test_extract_pdf_file_flattens_mineru_pdf_artifact_dir(tmp_path: Path) -> No
     assert payload["pages"][0]["layout_ref"]["uri"] == str(artifact_dir / "1_middle.json")
 
 
-def test_extract_pdf_file_flattens_converted_image_artifact_dir(tmp_path: Path) -> None:
+def test_extract_pdf_file_flattens_image_artifact_dir_directly(tmp_path: Path) -> None:
+    """Image inputs no longer go through .converted.pdf — files use original stem."""
     from PIL import Image
 
     image_path = tmp_path / "input" / "10_01.jpg"
@@ -360,17 +363,18 @@ def test_extract_pdf_file_flattens_converted_image_artifact_dir(tmp_path: Path) 
             document = next(items)
             output_dir = Path(document["meta"]["mineru_options"]["output_dir"])
             mineru_stem = Path(document["file_uri"]).stem
-            assert mineru_stem == "10_01.converted"
+            # Image passed directly — stem is the original filename stem
+            assert mineru_stem == "10_01"
             mineru_auto_dir = output_dir / mineru_stem / "auto"
             mineru_auto_dir.mkdir(parents=True)
-            middle_json = mineru_auto_dir / "10_01.converted_middle.json"
+            middle_json = mineru_auto_dir / "10_01_middle.json"
             middle_json.write_text("{}", encoding="utf-8")
-            markdown = mineru_auto_dir / "10_01.converted.md"
+            markdown = mineru_auto_dir / "10_01.md"
             markdown.write_text(
                 "# Demo\n\n<table><tr><td>姓名</td><td>结果</td></tr></table>\n",
                 encoding="utf-8",
             )
-            content_list = mineru_auto_dir / "10_01.converted_content_list.json"
+            content_list = mineru_auto_dir / "10_01_content_list.json"
             content_list.write_text(
                 json.dumps(
                     [
@@ -410,19 +414,19 @@ def test_extract_pdf_file_flattens_converted_image_artifact_dir(tmp_path: Path) 
     artifact_dir = Path(result.artifact_dir)
     assert result.success is True
     assert Path(result.json_path or "") == artifact_dir / "10_01.json"
-    assert Path(result.converted_pdf_path or "") == artifact_dir / "10_01.converted.pdf"
-    assert (artifact_dir / "10_01.converted_middle.json").exists()
-    markdown = artifact_dir / "10_01.converted.md"
+    assert result.converted_pdf_path is None  # No longer converted
+    assert (artifact_dir / "10_01_middle.json").exists()
+    markdown = artifact_dir / "10_01.md"
     assert markdown.exists()
     markdown_text = markdown.read_text(encoding="utf-8")
     assert "<table" not in markdown_text
     assert "姓名 | 结果" in markdown_text
     assert "实名认证信息表 | 页码，1/1" in markdown_text
     assert markdown_text.rstrip().endswith("http://example.local/print 2025/5/14")
-    assert not (artifact_dir / "10_01.converted").exists()
+    assert not (artifact_dir / "10_01").exists()
     assert not (artifact_dir / "auto").exists()
     payload = json.loads(Path(result.json_path or "").read_text(encoding="utf-8"))
-    assert payload["artifacts"][0]["uri"] == str(artifact_dir / "10_01.converted_middle.json")
+    assert payload["artifacts"][0]["uri"] == str(artifact_dir / "10_01_middle.json")
 
 
 def test_markdown_html_table_normalization_preserves_grid_and_repairs_dates() -> None:
@@ -584,7 +588,7 @@ def test_extract_pdf_file_can_export_page_screenshots(
                 },
             ).model_dump(mode="python")
 
-    def _fake_render(pdf_path, *, output_dir, page_count, dpi):  # noqa: ANN001
+    def _fake_render(input_path, *, output_dir, page_count, dpi, input_type="pdf"):  # noqa: ANN001
         output_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = output_dir / "page_0001.png"
         screenshot_path.write_bytes(b"png")
@@ -595,7 +599,7 @@ def test_extract_pdf_file_can_export_page_screenshots(
                     "page_index": 0,
                     "page_number": 1,
                     "image_path": str(screenshot_path),
-                    "source_pdf": str(pdf_path),
+                    "source_pdf": str(input_path),
                     "dpi": dpi,
                 }
             )
@@ -608,7 +612,7 @@ def test_extract_pdf_file_can_export_page_screenshots(
             meta={"page_count": page_count, "dpi": dpi},
         )
 
-    monkeypatch.setattr(pdf_extract_module, "_render_pdf_page_screenshots", _fake_render)
+    monkeypatch.setattr(pdf_extract_module, "_render_input_page_screenshots", _fake_render)
 
     result = extract_pdf_file(
         pdf_path,
@@ -737,7 +741,7 @@ def test_extract_pdf_dir_scans_images_and_pdfs(tmp_path: Path) -> None:
     assert {Path(item.json_path or "").name for item in report.items} == {"demo.json", "photo.json"}
     image_item = next(item for item in report.items if item.source_file_name == "photo.jpg")
     assert image_item.input_type == "image"
-    assert image_item.converted_pdf_path is not None
+    assert image_item.converted_pdf_path is None  # No longer converted
 
 
 def test_extract_pdf_dir_preserves_recursive_relative_directories(tmp_path: Path) -> None:
@@ -780,7 +784,7 @@ def test_extract_pdf_dir_preserves_recursive_relative_directories(tmp_path: Path
     assert item.output_relative_dir == "3-WS-001"
     assert Path(item.artifact_dir) == tmp_path / "output" / "3-WS-001" / "0189"
     assert Path(item.json_path or "") == tmp_path / "output" / "3-WS-001" / "0189" / "0189.json"
-    assert Path(item.converted_pdf_path or "") == tmp_path / "output" / "3-WS-001" / "0189" / "0189.converted.pdf"
+    assert item.converted_pdf_path is None  # No longer converted
 
 
 def test_extract_pdf_dir_preserves_direct_business_folder_name(tmp_path: Path) -> None:
