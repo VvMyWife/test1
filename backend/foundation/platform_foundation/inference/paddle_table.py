@@ -1689,6 +1689,8 @@ def _parse_table_structure_module_result(
         or _structure_to_html(payload.get("structure"))
         or candidate_html
     )
+    # Candidate boxes from TableStructureRecognition already represent cells.
+    # Keep the original grid order so HTML cell text can align 1:1.
     _assign_grid_indices(candidates)
     if candidate_html:
         _fill_cell_text_from_html(
@@ -1697,6 +1699,7 @@ def _parse_table_structure_module_result(
             context_text=_join_text_block_content(page_text_blocks),
         )
     _merge_wrapped_cell_fragments_from_html(candidates, html)
+    _sort_candidates_row_major(candidates)
     _fill_cell_text_from_page_blocks(candidates, page_text_blocks)
     cells = [TableCell(**candidate) for candidate in candidates]
     normalized_html = None if cells else html
@@ -1741,50 +1744,78 @@ def _parse_table_block(
     rec_boxes = _as_list(ocr_pred.get("rec_boxes"))
     cell_boxes = _as_list(raw_table.get("cell_box_list"))
 
-    if cell_boxes and len(cell_boxes) == len(texts):
-        raw_boxes = cell_boxes
-        bbox_source = "cell_box_list"
-    elif rec_boxes:
-        raw_boxes = rec_boxes
-        bbox_source = "table_ocr_pred.rec_boxes"
-    else:
-        raw_boxes = cell_boxes
-        bbox_source = "cell_box_list"
-
     candidates: list[JsonDict] = []
-    item_count = max(len(raw_boxes), len(texts))
-    for cell_index in range(item_count):
-        bbox = (
-            _coerce_bbox(
-                raw_boxes[cell_index],
+    if cell_boxes:
+        for cell_index, raw_box in enumerate(cell_boxes):
+            bbox = _coerce_bbox(
+                raw_box,
                 scale_x=scale_x,
                 scale_y=scale_y,
                 offset_x=offset_x,
                 offset_y=offset_y,
             )
-            if cell_index < len(raw_boxes)
-            else None
+            if bbox is None:
+                continue
+            candidates.append(
+                {
+                    "cell_id": f"p{page_index}-t{table_index}-c{cell_index}",
+                    "text": "",
+                    "bounding_box": bbox,
+                    "confidence": None,
+                    "meta": {
+                        "source": "paddleocr_table",
+                        "paddle_index": cell_index,
+                        "bbox_source": "cell_box_list",
+                    },
+                }
+            )
+        _fill_cell_text_from_ocr_fragments(
+            candidates,
+            texts=texts,
+            scores=scores,
+            raw_boxes=rec_boxes or cell_boxes,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            bbox_source="table_ocr_pred.rec_boxes" if rec_boxes else "cell_box_list",
         )
-        text = texts[cell_index] if cell_index < len(texts) else ""
-        if bbox is None and not text:
-            continue
-        candidates.append(
-            {
-                "cell_id": f"p{page_index}-t{table_index}-c{cell_index}",
-                "text": text,
-                "bounding_box": bbox,
-                "confidence": scores[cell_index] if cell_index < len(scores) else None,
-                "meta": {
-                    "source": "paddleocr_table",
-                    "paddle_index": cell_index,
-                    "bbox_source": bbox_source,
-                },
-            }
-        )
+    else:
+        raw_boxes = rec_boxes
+        item_count = max(len(raw_boxes), len(texts))
+        for cell_index in range(item_count):
+            bbox = (
+                _coerce_bbox(
+                    raw_boxes[cell_index],
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                    offset_x=offset_x,
+                    offset_y=offset_y,
+                )
+                if cell_index < len(raw_boxes)
+                else None
+            )
+            text = texts[cell_index] if cell_index < len(texts) else ""
+            if bbox is None and not text:
+                continue
+            candidates.append(
+                {
+                    "cell_id": f"p{page_index}-t{table_index}-c{cell_index}",
+                    "text": text,
+                    "bounding_box": bbox,
+                    "confidence": scores[cell_index] if cell_index < len(scores) else None,
+                    "meta": {
+                        "source": "paddleocr_table",
+                        "paddle_index": cell_index,
+                        "bbox_source": "table_ocr_pred.rec_boxes",
+                    },
+                }
+            )
 
     html = _coerce_optional_str(raw_table.get("pred_html"))
     _assign_grid_indices(candidates)
     _merge_wrapped_cell_fragments_from_html(candidates, html)
+    _sort_candidates_row_major(candidates)
     cells = [TableCell(**candidate) for candidate in candidates]
     table_bbox = _union_bounding_boxes([cell.bounding_box for cell in cells])
     normalized_html = None if cells else html
@@ -1807,6 +1838,91 @@ def _parse_table_block(
             "raw_text_count": len(texts),
         },
     )
+
+
+def _fill_cell_text_from_ocr_fragments(
+    candidates: list[JsonDict],
+    *,
+    texts: Sequence[str],
+    scores: Sequence[float | None],
+    raw_boxes: Sequence[Any],
+    scale_x: float,
+    scale_y: float,
+    offset_x: float,
+    offset_y: float,
+    bbox_source: str,
+) -> None:
+    if not candidates or not texts:
+        return
+
+    fragments: list[JsonDict] = []
+    for index, text in enumerate(texts):
+        normalized = _normalize_table_cell_text(text)
+        if not normalized:
+            continue
+        bbox = (
+            _coerce_bbox(
+                raw_boxes[index],
+                scale_x=scale_x,
+                scale_y=scale_y,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            )
+            if index < len(raw_boxes)
+            else None
+        )
+        if bbox is None:
+            continue
+        fragments.append(
+            {
+                "text": normalized,
+                "bounding_box": bbox,
+                "confidence": scores[index] if index < len(scores) else None,
+                "source_index": index,
+            }
+        )
+
+    if not fragments:
+        return
+
+    assignments: dict[int, list[JsonDict]] = {index: [] for index in range(len(candidates))}
+    for fragment in fragments:
+        fragment_box = fragment.get("bounding_box")
+        if not isinstance(fragment_box, BoundingBox):
+            continue
+        best_index: int | None = None
+        best_score = 0.0
+        for cell_index, candidate in enumerate(candidates):
+            cell_box = candidate.get("bounding_box")
+            if not isinstance(cell_box, BoundingBox):
+                continue
+            overlap = _bbox_intersection_ratio(fragment_box, cell_box)
+            inside = _bbox_center_inside(fragment_box, cell_box)
+            score = overlap + (1.0 if inside else 0.0)
+            if score > best_score:
+                best_score = score
+                best_index = cell_index
+        if best_index is not None and best_score >= 0.2:
+            assignments[best_index].append(fragment)
+
+    for cell_index, hits in assignments.items():
+        if not hits:
+            continue
+        hits.sort(key=lambda item: _cell_fragment_sort_key(item["bounding_box"]))
+        text = _normalize_table_cell_text("".join(str(item.get("text") or "") for item in hits))
+        if not text:
+            continue
+        candidate = candidates[cell_index]
+        candidate["text"] = text
+        confidences = [value for value in (item.get("confidence") for item in hits) if value is not None]
+        if confidences:
+            candidate["confidence"] = float(max(confidences))
+        meta = dict(candidate.get("meta") or {})
+        meta["text_source"] = "table_ocr_pred.fragments"
+        meta["ocr_fragment_count"] = len(hits)
+        meta["ocr_fragment_indexes"] = [int(item["source_index"]) for item in hits]
+        meta["ocr_fragment_bbox_source"] = bbox_source
+        candidate["meta"] = meta
 
 
 def _parse_ocr_payload_text_blocks(
@@ -2018,6 +2134,15 @@ def _assign_grid_indices(candidates: list[JsonDict]) -> None:
             continue
         item["row_index"] = _nearest_index(row_centers, box.y + box.h / 2.0)
         item["col_index"] = _nearest_index(col_centers, box.x + box.w / 2.0)
+
+
+def _sort_candidates_row_major(candidates: list[JsonDict]) -> None:
+    candidates.sort(
+        key=lambda item: (
+            int(item.get("row_index") or 0),
+            int(item.get("col_index") or 0),
+        )
+    )
 
 
 def _merge_wrapped_cell_fragments_from_html(candidates: list[JsonDict], html: str | None) -> None:
@@ -2351,6 +2476,27 @@ def _horizontal_overlap_ratio(left: BoundingBox, right: BoundingBox) -> float:
     if x1 <= x0:
         return 0.0
     return float((x1 - x0) / max(1, min(left.w, right.w)))
+
+
+def _bbox_intersection_ratio(left: BoundingBox, right: BoundingBox) -> float:
+    x0 = max(left.x, right.x)
+    x1 = min(left.x + left.w, right.x + right.w)
+    y0 = max(left.y, right.y)
+    y1 = min(left.y + left.h, right.y + right.h)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    overlap_area = float((x1 - x0) * (y1 - y0))
+    left_area = max(1.0, float(left.w * left.h))
+    return overlap_area / left_area
+
+
+def _cell_fragment_sort_key(box: BoundingBox) -> tuple[int, int, int, int]:
+    return (
+        int(round(box.y / 4.0)),
+        int(round(box.x / 4.0)),
+        int(box.y),
+        int(box.x),
+    )
 
 
 def _cluster_centers(values: Sequence[float], *, tolerance: float) -> list[float]:

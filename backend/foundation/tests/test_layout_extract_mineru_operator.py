@@ -609,6 +609,49 @@ def test_parse_paddle_structure_tables_extracts_scaled_cells() -> None:
     assert parsed.meta["cell_count"] == 2
 
 
+def test_parse_paddle_structure_tables_uses_cell_boxes_as_true_cells() -> None:
+    parsed = parse_paddle_structure_tables(
+        [
+            {
+                "page_index": 0,
+                "width": 200,
+                "height": 160,
+                "table_res_list": [
+                    {
+                        "cell_box_list": [
+                            [0, 0, 100, 80],
+                            [100, 0, 200, 80],
+                        ],
+                        "table_ocr_pred": {
+                            "rec_texts": ["执行", "事务", "合伙人", "2025", "年6", "月19日"],
+                            "rec_scores": [0.99, 0.99, 0.99, 0.98, 0.98, 0.98],
+                            "rec_boxes": [
+                                [8, 10, 32, 30],
+                                [34, 10, 58, 30],
+                                [60, 10, 92, 30],
+                                [112, 10, 138, 30],
+                                [140, 10, 162, 30],
+                                [164, 10, 194, 30],
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+        target_page_sizes={0: ImageSize(width=200, height=160)},
+    )
+
+    table = parsed.tables_by_page[0][0]
+    assert len(table.cells) == 2
+    assert table.cells[0].text == "执行事务合伙人"
+    assert table.cells[0].meta["bbox_source"] == "cell_box_list"
+    assert table.cells[0].meta["text_source"] == "table_ocr_pred.fragments"
+    assert table.cells[0].meta["ocr_fragment_count"] == 3
+    assert table.cells[1].text == "2025年6月19日"
+    assert table.cells[1].meta["ocr_fragment_count"] == 3
+    assert parsed.meta["cell_count"] == 2
+
+
 def test_parse_paddle_structure_tables_merges_wrapped_html_cell_text() -> None:
     parsed = parse_paddle_structure_tables(
         [
