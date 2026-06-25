@@ -1620,33 +1620,21 @@ def _paddle_text_block_belongs_to_row(
     if not row_blocks:
         return False
 
-    row_tops: list[int] = []
-    row_bottoms: list[int] = []
     row_centers: list[float] = []
     row_heights: list[int] = []
     for row_block in row_blocks:
         _, y, _, h = _markdown_block_box(row_block)
-        row_tops.append(y)
-        row_bottoms.append(y + h)
         row_centers.append(y + h / 2.0)
         row_heights.append(max(1, h))
 
     _, candidate_y, _, candidate_h = _markdown_block_box(block)
-    candidate_bottom = candidate_y + candidate_h
     candidate_center = candidate_y + candidate_h / 2.0
 
-    row_top = min(row_tops)
-    row_bottom = max(row_bottoms)
-    row_height = max(1, row_bottom - row_top)
     average_height = max(1, int(sum(row_heights) / len(row_heights)))
     row_center = sum(row_centers) / len(row_centers)
 
-    vertical_overlap = min(row_bottom, candidate_bottom) - max(row_top, candidate_y)
-    center_tolerance = max(12, min(average_height, max(1, candidate_h)))
-
-    return vertical_overlap >= min(row_height, max(1, candidate_h)) * 0.25 or (
-        abs(candidate_center - row_center) <= center_tolerance
-    )
+    center_tolerance = max(10.0, min(average_height, max(1, candidate_h)) * 0.65)
+    return abs(candidate_center - row_center) <= center_tolerance
 
 
 def _render_paddle_text_row(row_blocks: list[Mapping[str, Any]]) -> str:

@@ -579,6 +579,11 @@ def test_markdown_normalization_rebuilds_ppocrv5_text_rows_with_left_right_layou
                             "bounding_box": {"x": 220, "y": 222, "w": 180, "h": 18},
                         },
                         {
+                            "text": "\u6709\u9650\u516c\u53f8",
+                            "block_type": "text",
+                            "bounding_box": {"x": 280, "y": 248, "w": 72, "h": 18},
+                        },
+                        {
                             "text": "\u9ed1\u9f99\u6c5f\u7701\u6cf0\u91d1\u5efa\u7b51\u5de5\u7a0b\u6709\u9650\u516c\u53f8",
                             "block_type": "text",
                             "bounding_box": {"x": 520, "y": 222, "w": 200, "h": 18},
@@ -626,6 +631,7 @@ def test_markdown_normalization_rebuilds_ppocrv5_text_rows_with_left_right_layou
         "\u56db\u5ddd\u4e2d\u5b9e\u519c\u4e1a\u53d1\u5c55\u6709\u9650\u516c\u53f8 | "
         "\u9ed1\u9f99\u6c5f\u7701\u6cf0\u91d1\u5efa\u7b51\u5de5\u7a0b\u6709\u9650\u516c\u53f8"
     ) in normalized
+    assert "\n\n\u6709\u9650\u516c\u53f8\n\n" in normalized
     assert (
         "\u7535\u5b50\u8425\u4e1a\u6267\u7167\u7b7e\u7ae0 | \u7535\u5b50\u8425\u4e1a\u6267\u7167\u7b7e\u7ae0"
     ) in normalized
