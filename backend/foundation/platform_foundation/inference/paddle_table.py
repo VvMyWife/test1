@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -587,6 +588,7 @@ def parse_paddle_structure_tables(
 ) -> PaddleTableStructureResult:
     target_sizes = dict(target_page_sizes or {})
     tables_by_page: dict[int, list[TableBlock]] = {}
+    text_blocks_by_page: dict[int, list[TextBlock]] = {}
     table_count = 0
     cell_count = 0
 
@@ -600,6 +602,16 @@ def parse_paddle_structure_tables(
             source_height=source_height,
             target_size=target_sizes.get(page_index),
         )
+        page_blocks = _parse_ocr_payload_text_blocks(
+            payload,
+            page_index=page_index,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            coord_space=coord_space,
+            provider="paddleocr_ppstructurev3",
+        )
+        if page_blocks:
+            text_blocks_by_page.setdefault(page_index, []).extend(page_blocks)
 
         for table_index, raw_table in enumerate(_as_mappings(payload.get("table_res_list"))):
             table = _parse_table_block(
@@ -613,6 +625,7 @@ def parse_paddle_structure_tables(
                 coord_space=coord_space,
                 source_width=source_width,
                 source_height=source_height,
+                page_text_blocks=page_blocks,
             )
             if table is None:
                 continue
@@ -622,12 +635,14 @@ def parse_paddle_structure_tables(
 
     return PaddleTableStructureResult(
         tables_by_page={page: tuple(tables) for page, tables in tables_by_page.items()},
+        text_blocks_by_page={page: tuple(blocks) for page, blocks in text_blocks_by_page.items()},
         artifact_ref=artifact_ref,
         meta={
             "provider": "paddleocr_ppstructurev3",
             "mode": "ppstructurev3",
             "table_count": table_count,
             "cell_count": cell_count,
+            "text_block_count": sum(len(blocks) for blocks in text_blocks_by_page.values()),
         },
     )
 
@@ -1737,6 +1752,7 @@ def _parse_table_block(
     coord_space: str,
     source_width: float | None,
     source_height: float | None,
+    page_text_blocks: Sequence[TextBlock],
 ) -> TableBlock | None:
     ocr_pred = _coerce_mapping(raw_table.get("table_ocr_pred")) or {}
     texts = [str(value).strip() for value in _as_list(ocr_pred.get("rec_texts"))]
@@ -1769,6 +1785,7 @@ def _parse_table_block(
                     },
                 }
             )
+        _assign_grid_indices(candidates)
         _fill_cell_text_from_ocr_fragments(
             candidates,
             texts=texts,
@@ -1780,6 +1797,22 @@ def _parse_table_block(
             offset_y=offset_y,
             bbox_source="table_ocr_pred.rec_boxes" if rec_boxes else "cell_box_list",
         )
+        if _header_row_is_bottom_heavy(candidates):
+            active_bounds = _active_candidate_text_bounds(candidates)
+            _reset_candidate_fragment_text(candidates)
+            _fill_cell_text_from_ocr_fragments(
+                candidates,
+                texts=texts,
+                scores=scores,
+                raw_boxes=rec_boxes or cell_boxes,
+                scale_x=scale_x,
+                scale_y=scale_y,
+                offset_x=offset_x,
+                offset_y=offset_y,
+                bbox_source="table_ocr_pred.rec_boxes" if rec_boxes else "cell_box_list",
+                box_transform="flip_xy",
+                transform_bounds=active_bounds,
+            )
     else:
         raw_boxes = rec_boxes
         item_count = max(len(raw_boxes), len(texts))
@@ -1815,6 +1848,7 @@ def _parse_table_block(
     html = _coerce_optional_str(raw_table.get("pred_html"))
     _assign_grid_indices(candidates)
     _merge_wrapped_cell_fragments_from_html(candidates, html)
+    _fill_suspicious_cell_text_from_page_blocks(candidates, page_text_blocks)
     _sort_candidates_row_major(candidates)
     cells = [TableCell(**candidate) for candidate in candidates]
     table_bbox = _union_bounding_boxes([cell.bounding_box for cell in cells])
@@ -1851,6 +1885,8 @@ def _fill_cell_text_from_ocr_fragments(
     offset_x: float,
     offset_y: float,
     bbox_source: str,
+    box_transform: str | None = None,
+    transform_bounds: BoundingBox | None = None,
 ) -> None:
     if not candidates or not texts:
         return
@@ -1884,6 +1920,24 @@ def _fill_cell_text_from_ocr_fragments(
 
     if not fragments:
         return
+
+    if box_transform:
+        resolved_transform_bounds = transform_bounds or _union_bounding_boxes(
+            [
+                box
+                for box in (fragment.get("bounding_box") for fragment in fragments)
+                if isinstance(box, BoundingBox)
+            ]
+        )
+        if resolved_transform_bounds is not None:
+            for fragment in fragments:
+                box = fragment.get("bounding_box")
+                if isinstance(box, BoundingBox):
+                    fragment["bounding_box"] = _transform_fragment_box(
+                        box,
+                        grid_bounds=resolved_transform_bounds,
+                        transform=box_transform,
+                    )
 
     assignments: dict[int, list[JsonDict]] = {index: [] for index in range(len(candidates))}
     for fragment in fragments:
@@ -1921,6 +1975,8 @@ def _fill_cell_text_from_ocr_fragments(
         meta["ocr_fragment_count"] = len(hits)
         meta["ocr_fragment_indexes"] = [int(item["source_index"]) for item in hits]
         meta["ocr_fragment_bbox_source"] = bbox_source
+        if box_transform:
+            meta["ocr_fragment_box_transform"] = box_transform
         candidate["meta"] = meta
 
 
@@ -1970,6 +2026,22 @@ def _should_expand_vertical_fragment(text: str, box: BoundingBox) -> bool:
     if ratio < 0.55 or ratio > 1.8:
         return False
     return box.h > box.w * 1.1
+
+
+def _transform_fragment_box(
+    box: BoundingBox,
+    *,
+    grid_bounds: BoundingBox,
+    transform: str,
+) -> BoundingBox:
+    if transform == "flip_xy":
+        return BoundingBox(
+            x=int(grid_bounds.x + grid_bounds.w - (box.x - grid_bounds.x) - box.w),
+            y=int(grid_bounds.y + grid_bounds.h - (box.y - grid_bounds.y) - box.h),
+            w=int(box.w),
+            h=int(box.h),
+        )
+    return box
 
 
 def _parse_ocr_payload_text_blocks(
@@ -2102,7 +2174,9 @@ def _fill_cell_text_from_page_blocks(candidates: list[JsonDict], text_blocks: Se
         [
             (index, block)
             for index, block in enumerate(text_blocks)
-            if block.bounding_box is not None and block.block_type != "table_cell" and block.text.strip()
+            if block.bounding_box is not None
+            and block.block_type in {"text", "seal_text"}
+            and block.text.strip()
         ],
         key=lambda item: (item[1].bounding_box.y, item[1].bounding_box.x),
     )
@@ -2128,6 +2202,95 @@ def _fill_cell_text_from_page_blocks(candidates: list[JsonDict], text_blocks: Se
         meta = dict(candidate.get("meta") or {})
         meta["text_block_count"] = len(hits)
         candidate["meta"] = meta
+
+
+def _fill_suspicious_cell_text_from_page_blocks(
+    candidates: list[JsonDict],
+    text_blocks: Sequence[TextBlock],
+) -> None:
+    if not candidates or not text_blocks:
+        return
+
+    sorted_blocks = sorted(
+        [
+            (index, block)
+            for index, block in enumerate(text_blocks)
+            if block.bounding_box is not None and block.block_type != "table_cell" and block.text.strip()
+        ],
+        key=lambda item: (item[1].bounding_box.y, item[1].bounding_box.x),
+    )
+    used_block_indexes: set[int] = set()
+
+    for candidate in candidates:
+        current_text = _normalize_table_cell_text(str(candidate.get("text") or ""))
+        if not _candidate_needs_page_text_fallback(current_text):
+            continue
+        cell_box = candidate.get("bounding_box")
+        if cell_box is None:
+            continue
+        hits: list[TextBlock] = []
+        for block_index, block in sorted_blocks:
+            if block_index in used_block_indexes:
+                continue
+            if _bbox_center_inside(block.bounding_box, cell_box):
+                hits.append(block)
+        if not hits:
+            continue
+        fallback_text = _compose_cell_text_from_hits(
+            [
+                {"text": block.text, "bounding_box": block.bounding_box}
+                for block in hits
+                if block.bounding_box is not None
+            ]
+        )
+        if not _should_replace_cell_text_with_page_fallback(current_text, fallback_text):
+            continue
+        for block_index, block in sorted_blocks:
+            if block in hits:
+                used_block_indexes.add(block_index)
+        candidate["text"] = fallback_text
+        confidences = [block.confidence for block in hits if block.confidence is not None]
+        if confidences:
+            candidate["confidence"] = float(mean(confidences))
+        meta = dict(candidate.get("meta") or {})
+        meta["page_text_fallback"] = True
+        meta["page_text_block_count"] = len(hits)
+        candidate["meta"] = meta
+
+
+def _candidate_needs_page_text_fallback(text: str) -> bool:
+    normalized = _normalize_table_cell_text_without_date(text)
+    if not normalized:
+        return True
+    if len(normalized) <= 1:
+        return True
+    if re.search(r"[\u4e00-\u9fff][A-Za-z]$", normalized):
+        return True
+    return bool(_looks_like_date_fragment(normalized) and _extract_context_date(normalized) is None)
+
+
+def _should_replace_cell_text_with_page_fallback(current_text: str, fallback_text: str) -> bool:
+    if not fallback_text:
+        return False
+    current = _normalize_table_cell_text(current_text)
+    fallback = _normalize_table_cell_text(fallback_text)
+    if not fallback or ("<" in fallback and ">" in fallback):
+        return False
+    if not re.search(r"[\u4e00-\u9fff]", fallback) and not _extract_context_date(fallback):
+        digit_count = sum(1 for ch in fallback if ch.isdigit())
+        if digit_count < 8:
+            return False
+    if not current:
+        return True
+    if len(_normalize_table_cell_text_without_date(current)) <= 1 and len(fallback) > len(current):
+        return True
+    current_date = _extract_context_date(current)
+    fallback_date = _extract_context_date(fallback)
+    if fallback_date and fallback_date != current_date:
+        return True
+    if re.search(r"[\u4e00-\u9fff][A-Za-z]$", current) and len(fallback) <= len(current):
+        return True
+    return False
 
 
 def _fill_cell_text_from_html(
@@ -2181,6 +2344,87 @@ def _assign_grid_indices(candidates: list[JsonDict]) -> None:
             continue
         item["row_index"] = _nearest_index(row_centers, box.y + box.h / 2.0)
         item["col_index"] = _nearest_index(col_centers, box.x + box.w / 2.0)
+
+
+def _header_row_is_bottom_heavy(candidates: Sequence[Mapping[str, Any]]) -> bool:
+    rows = _candidate_text_rows(candidates)
+    non_empty_rows = [row for row in rows if any(cell for cell in row)]
+    if len(non_empty_rows) < 2:
+        return False
+    first_score = _table_header_row_score(non_empty_rows[0])
+    last_score = _table_header_row_score(non_empty_rows[-1])
+    return last_score >= first_score + 2
+
+
+def _candidate_text_rows(candidates: Sequence[Mapping[str, Any]]) -> list[list[str]]:
+    row_map: dict[int, dict[int, str]] = defaultdict(dict)
+    for candidate in candidates:
+        row_index = candidate.get("row_index")
+        col_index = candidate.get("col_index")
+        if row_index is None or col_index is None:
+            continue
+        row_map[int(row_index)][int(col_index)] = _normalize_table_cell_text(
+            str(candidate.get("text") or "")
+        )
+    if not row_map:
+        return []
+    rows: list[list[str]] = []
+    for row_index in sorted(row_map):
+        cols = row_map[row_index]
+        width = max(cols) + 1 if cols else 0
+        row = [cols.get(col_index, "") for col_index in range(width)]
+        rows.append(row)
+    return rows
+
+
+def _active_candidate_text_bounds(candidates: Sequence[Mapping[str, Any]]) -> BoundingBox | None:
+    return _union_bounding_boxes(
+        [
+            box
+            for candidate in candidates
+            if str(candidate.get("text") or "").strip()
+            for box in [candidate.get("bounding_box")]
+            if isinstance(box, BoundingBox)
+        ]
+    )
+
+
+def _table_header_row_score(row: Sequence[str]) -> int:
+    header_keywords = (
+        "姓名",
+        "身份",
+        "证号",
+        "身份证",
+        "角色",
+        "时间",
+        "人像",
+        "签字",
+        "方式",
+        "结果",
+    )
+    score = 0
+    for cell in row:
+        text = _normalize_table_cell_text_without_date(cell)
+        if not text:
+            continue
+        score += sum(1 for keyword in header_keywords if keyword in text)
+    return score
+
+
+def _reset_candidate_fragment_text(candidates: Sequence[JsonDict]) -> None:
+    for candidate in candidates:
+        candidate["text"] = ""
+        candidate["confidence"] = None
+        meta = dict(candidate.get("meta") or {})
+        for key in (
+            "text_source",
+            "ocr_fragment_count",
+            "ocr_fragment_indexes",
+            "ocr_fragment_bbox_source",
+            "ocr_fragment_box_transform",
+        ):
+            meta.pop(key, None)
+        candidate["meta"] = meta
 
 
 def _sort_candidates_row_major(candidates: list[JsonDict]) -> None:

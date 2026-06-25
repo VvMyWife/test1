@@ -687,6 +687,176 @@ def test_parse_paddle_structure_tables_interleaves_vertical_fragment_columns() -
     assert table.cells[0].text == "abcdefghijklm"
 
 
+def test_parse_paddle_structure_tables_flips_180_degree_fragment_boxes() -> None:
+    parsed = parse_paddle_structure_tables(
+        [
+            {
+                "page_index": 0,
+                "width": 180,
+                "height": 120,
+                "table_res_list": [
+                    {
+                        "cell_box_list": [
+                            [0, 0, 60, 40],
+                            [60, 0, 120, 40],
+                            [120, 0, 180, 40],
+                            [0, 40, 60, 120],
+                            [60, 40, 120, 120],
+                            [120, 40, 180, 120],
+                        ],
+                        "table_ocr_pred": {
+                            "rec_texts": [
+                                "\u59d3\u540d",
+                                "\u8eab\u4efd\u8bc1\u53f7\u7801",
+                                "\u7ed3\u679c",
+                                "\u4f55\u4f1f",
+                                "510602197808294054",
+                                "\u6210\u529f",
+                            ],
+                            "rec_scores": [0.99] * 6,
+                            "rec_boxes": [
+                                [120, 80, 180, 120],
+                                [60, 80, 120, 120],
+                                [0, 80, 60, 120],
+                                [120, 0, 180, 40],
+                                [60, 0, 120, 40],
+                                [0, 0, 60, 40],
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+        target_page_sizes={0: ImageSize(width=180, height=120)},
+    )
+
+    table = parsed.tables_by_page[0][0]
+    cells = {(cell.row_index, cell.col_index): cell for cell in table.cells}
+    assert cells[(0, 0)].text == "\u59d3\u540d"
+    assert cells[(0, 1)].text == "\u8eab\u4efd\u8bc1\u53f7\u7801"
+    assert cells[(0, 2)].text == "\u7ed3\u679c"
+    assert cells[(1, 0)].text == "\u4f55\u4f1f"
+    assert cells[(1, 1)].text == "510602197808294054"
+    assert cells[(1, 2)].text == "\u6210\u529f"
+    assert cells[(0, 0)].meta["ocr_fragment_box_transform"] == "flip_xy"
+
+
+def test_parse_paddle_structure_tables_flips_when_last_row_is_empty() -> None:
+    parsed = parse_paddle_structure_tables(
+        [
+            {
+                "page_index": 0,
+                "width": 180,
+                "height": 180,
+                "table_res_list": [
+                    {
+                        "cell_box_list": [
+                            [0, 0, 60, 40],
+                            [60, 0, 120, 40],
+                            [120, 0, 180, 40],
+                            [0, 40, 60, 120],
+                            [60, 40, 120, 120],
+                            [120, 40, 180, 120],
+                            [0, 120, 60, 180],
+                            [60, 120, 120, 180],
+                            [120, 120, 180, 180],
+                        ],
+                        "table_ocr_pred": {
+                            "rec_texts": [
+                                "\u59d3\u540d",
+                                "\u8eab\u4efd\u8bc1\u53f7\u7801",
+                                "\u7ed3\u679c",
+                                "\u4f55\u4f1f",
+                                "510602197808294054",
+                                "\u6210\u529f",
+                            ],
+                            "rec_scores": [0.99] * 6,
+                            "rec_boxes": [
+                                [120, 60, 180, 120],
+                                [60, 60, 120, 120],
+                                [0, 60, 60, 120],
+                                [120, 0, 180, 40],
+                                [60, 0, 120, 40],
+                                [0, 0, 60, 40],
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+        target_page_sizes={0: ImageSize(width=180, height=180)},
+    )
+
+    table = parsed.tables_by_page[0][0]
+    cells = {(cell.row_index, cell.col_index): cell for cell in table.cells}
+    assert cells[(0, 0)].text == "\u59d3\u540d"
+    assert cells[(0, 1)].text == "\u8eab\u4efd\u8bc1\u53f7\u7801"
+    assert cells[(0, 2)].text == "\u7ed3\u679c"
+    assert cells[(1, 0)].text == "\u4f55\u4f1f"
+    assert cells[(1, 1)].text == "510602197808294054"
+    assert cells[(1, 2)].text == "\u6210\u529f"
+    assert all(cells[(2, col)].text == "" for col in range(3))
+
+
+def test_parse_paddle_structure_tables_fills_suspicious_cells_from_page_ocr() -> None:
+    parsed = parse_paddle_structure_tables(
+        [
+            {
+                "page_index": 0,
+                "width": 180,
+                "height": 120,
+                "table_res_list": [
+                    {
+                        "cell_box_list": [
+                            [0, 0, 60, 40],
+                            [60, 0, 120, 40],
+                            [120, 0, 180, 40],
+                            [0, 40, 60, 120],
+                            [60, 40, 120, 120],
+                            [120, 40, 180, 120],
+                        ],
+                        "table_ocr_pred": {
+                            "rec_texts": [
+                                "\u59d3\u540d",
+                                "\u8eab\u4efd\u8bc1\u53f7\u7801",
+                                "\u7ed3\u679c",
+                                "",
+                                "510602197808294054",
+                                "X",
+                            ],
+                            "rec_scores": [0.99] * 6,
+                            "rec_boxes": [
+                                [0, 0, 60, 40],
+                                [60, 0, 120, 40],
+                                [120, 0, 180, 40],
+                                [0, 40, 60, 120],
+                                [60, 40, 120, 120],
+                                [120, 40, 180, 120],
+                            ],
+                        },
+                    }
+                ],
+                "overall_ocr_res": {
+                    "rec_texts": ["\u4f55\u4f1f", "\u6210\u529f"],
+                    "rec_boxes": [
+                        [5, 45, 55, 80],
+                        [125, 45, 175, 80],
+                    ],
+                    "rec_scores": [0.98, 0.98],
+                },
+            }
+        ],
+        target_page_sizes={0: ImageSize(width=180, height=120)},
+    )
+
+    table = parsed.tables_by_page[0][0]
+    cells = {(cell.row_index, cell.col_index): cell for cell in table.cells}
+    assert cells[(1, 0)].text == "\u4f55\u4f1f"
+    assert cells[(1, 2)].text == "\u6210\u529f"
+    assert cells[(1, 0)].meta["page_text_fallback"] is True
+    assert cells[(1, 2)].meta["page_text_fallback"] is True
+
+
 def test_parse_paddle_structure_tables_merges_wrapped_html_cell_text() -> None:
     parsed = parse_paddle_structure_tables(
         [

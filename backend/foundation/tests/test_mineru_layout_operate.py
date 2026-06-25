@@ -603,6 +603,58 @@ def test_markdown_normalization_rebuilds_markdown_table_from_paddle_cells(tmp_pa
     assert "| \u59da\u6d2a\u83ca | 510602197307030982 | \u59d4\u6258\u4ee3\u7406\u4eba | 2025\u5e746\u670819\u65e5 |" in normalized
 
 
+def test_markdown_normalization_blanks_image_columns_and_keeps_footer_separate(tmp_path: Path) -> None:
+    markdown_path = tmp_path / "0062.md"
+    markdown_path.write_text(
+        (
+            "| old | old | old | old | old | old | old | old |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            "| old | old | old | old | old | old | old | old |http://footer\n"
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "paddle_table_structure.json").write_text(
+        json.dumps(
+            {
+                "provider": "paddleocr_ppstructurev3",
+                "mode": "ppstructurev3",
+                "tables_by_page": {
+                    "0": [
+                        {
+                            "cells": [
+                                {"text": "\u59d3\u540d", "row_index": 0, "col_index": 0, "bounding_box": {"x": 0, "y": 0}},
+                                {"text": "\u8eab\u4efd\u8bc1\u53f7\u7801", "row_index": 0, "col_index": 1, "bounding_box": {"x": 40, "y": 0}},
+                                {"text": "\u89d2\u8272", "row_index": 0, "col_index": 2, "bounding_box": {"x": 80, "y": 0}},
+                                {"text": "\u5b9e\u540d\u8ba4\u8bc1\u65f6\u95f4", "row_index": 0, "col_index": 3, "bounding_box": {"x": 120, "y": 0}},
+                                {"text": "\u4eba\u50cf\u4fe1\u606f", "row_index": 0, "col_index": 4, "bounding_box": {"x": 160, "y": 0}},
+                                {"text": "\u7b7e\u5b57\u4fe1\u606f", "row_index": 0, "col_index": 5, "bounding_box": {"x": 200, "y": 0}},
+                                {"text": "\u8ba4\u8bc1\u65b9\u5f0f", "row_index": 0, "col_index": 6, "bounding_box": {"x": 240, "y": 0}},
+                                {"text": "\u7ed3\u679c", "row_index": 0, "col_index": 7, "bounding_box": {"x": 280, "y": 0}},
+                                {"text": "\u6768\u5e08\u5e08", "row_index": 1, "col_index": 0, "bounding_box": {"x": 0, "y": 40}},
+                                {"text": "510623199605121920", "row_index": 1, "col_index": 1, "bounding_box": {"x": 40, "y": 40}},
+                                {"text": "\u59d4\u6258\u4ee3\u7406\u4eba", "row_index": 1, "col_index": 2, "bounding_box": {"x": 80, "y": 40}},
+                                {"text": "2025\u5e745\u670814\u65e5", "row_index": 1, "col_index": 3, "bounding_box": {"x": 120, "y": 40}},
+                                {"text": "1", "row_index": 1, "col_index": 4, "bounding_box": {"x": 160, "y": 40}},
+                                {"text": "2", "row_index": 1, "col_index": 5, "bounding_box": {"x": 200, "y": 40}},
+                                {"text": "\u603b\u5c40\u8ba4\u8bc1", "row_index": 1, "col_index": 6, "bounding_box": {"x": 240, "y": 40}},
+                                {"text": "\u6210\u529f", "row_index": 1, "col_index": 7, "bounding_box": {"x": 280, "y": 40}},
+                            ]
+                        }
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pdf_extract_module._normalize_markdown_artifacts(tmp_path)
+
+    normalized = markdown_path.read_text(encoding="utf-8")
+    assert "| \u6768\u5e08\u5e08 | 510623199605121920 | \u59d4\u6258\u4ee3\u7406\u4eba | 2025\u5e745\u670814\u65e5 |  |  | \u603b\u5c40\u8ba4\u8bc1 | \u6210\u529f |" in normalized
+    assert "\n\nhttp://footer" in normalized
+
+
 def test_extract_pdf_file_writes_error_json_for_invalid_input(tmp_path: Path) -> None:
     result = extract_pdf_file(
         tmp_path / "missing.pdf",

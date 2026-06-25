@@ -1507,6 +1507,7 @@ def _normalize_markdown_artifacts(artifact_dir: Path) -> None:
             continue
         normalized = _replace_html_tables_with_text(markdown)
         normalized = _replace_markdown_with_paddle_text_if_available(markdown_path, normalized)
+        normalized = _split_trailing_footer_after_markdown_table(normalized)
         normalized = _merge_markdown_peripheral_text(markdown_path, normalized)
         normalized = _append_markdown_seal_section(markdown_path, normalized)
         if normalized != markdown:
@@ -1638,6 +1639,7 @@ def _paddle_table_rows(table: Mapping[str, Any]) -> list[list[str]]:
                 row.extend("" for _ in range(span - 1))
         if any(cell for cell in row):
             rows.append(row)
+    _sanitize_semantic_markdown_table_rows(rows)
     return rows
 
 
@@ -1662,12 +1664,16 @@ def _replace_markdown_table_blocks(markdown: str, table_markdowns: list[str]) ->
             return match.group(0)
         replacement = table_markdowns[index]
         index += 1
-        return replacement
+        return replacement + "\n"
 
     updated = table_pattern.sub(_replace, markdown)
     if index == 0:
         return markdown
     return updated
+
+
+def _split_trailing_footer_after_markdown_table(markdown: str) -> str:
+    return re.sub(r"\|(?=https?://)", "|\n\n", markdown)
 
 
 def _markdown_block_sort_key(block: Mapping[str, Any]) -> tuple[int, int]:
@@ -2114,6 +2120,21 @@ def _normalize_markdown_table_cell(text: str) -> str:
     normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
     normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
     return _extract_markdown_context_date(normalized) or normalized
+
+
+def _sanitize_semantic_markdown_table_rows(rows: list[list[str]]) -> None:
+    if len(rows) < 2:
+        return
+    headers = rows[0]
+    image_columns = [
+        index
+        for index, header in enumerate(headers)
+        if "\u4eba\u50cf\u4fe1\u606f" in header or "\u7b7e\u5b57\u4fe1\u606f" in header
+    ]
+    for row in rows[1:]:
+        for col_index in image_columns:
+            if col_index < len(row):
+                row[col_index] = ""
 
 
 def _repair_contextual_markdown_table_cells(rows: list[list[str]], *, context_text: str | None) -> None:
