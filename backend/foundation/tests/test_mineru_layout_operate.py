@@ -551,6 +551,88 @@ def test_markdown_normalization_rebuilds_seal_mode_from_paddle_blocks(tmp_path: 
     )
 
 
+def test_markdown_normalization_rebuilds_ppocrv5_text_rows_with_left_right_layout(
+    tmp_path: Path,
+) -> None:
+    markdown_path = tmp_path / "0090.md"
+    markdown_path.write_text("\u4e22\u5931\u7684\u65e7\u6587\u672c\n", encoding="utf-8")
+    (tmp_path / "paddle_table_structure.json").write_text(
+        json.dumps(
+            {
+                "provider": "paddleocr_ppocrv5",
+                "mode": "ppocrv5",
+                "text_blocks_by_page": {
+                    "0": [
+                        {
+                            "text": "\u672c\u6587\u4ef6\u5df2\u7531",
+                            "block_type": "text",
+                            "bounding_box": {"x": 260, "y": 183, "w": 70, "h": 18},
+                        },
+                        {
+                            "text": "\u672c\u6587\u4ef6\u5df2\u7531",
+                            "block_type": "text",
+                            "bounding_box": {"x": 567, "y": 183, "w": 70, "h": 18},
+                        },
+                        {
+                            "text": "\u56db\u5ddd\u4e2d\u5b9e\u519c\u4e1a\u53d1\u5c55\u6709\u9650\u516c\u53f8",
+                            "block_type": "text",
+                            "bounding_box": {"x": 220, "y": 222, "w": 180, "h": 18},
+                        },
+                        {
+                            "text": "\u9ed1\u9f99\u6c5f\u7701\u6cf0\u91d1\u5efa\u7b51\u5de5\u7a0b\u6709\u9650\u516c\u53f8",
+                            "block_type": "text",
+                            "bounding_box": {"x": 520, "y": 222, "w": 200, "h": 18},
+                        },
+                        {
+                            "text": "\u7535\u5b50\u8425\u4e1a\u6267\u7167\u7b7e\u7ae0",
+                            "block_type": "text",
+                            "bounding_box": {"x": 245, "y": 303, "w": 120, "h": 18},
+                        },
+                        {
+                            "text": "\u7535\u5b50\u8425\u4e1a\u6267\u7167\u7b7e\u7ae0",
+                            "block_type": "text",
+                            "bounding_box": {"x": 552, "y": 303, "w": 120, "h": 18},
+                        },
+                        {
+                            "text": "2025-08-2915:28:37",
+                            "block_type": "text",
+                            "bounding_box": {"x": 230, "y": 329, "w": 150, "h": 18},
+                        },
+                        {
+                            "text": "2025-08-2815:17:11",
+                            "block_type": "text",
+                            "bounding_box": {"x": 540, "y": 329, "w": 150, "h": 18},
+                        },
+                        {
+                            "text": "2025\u5e747\u670822\u65e5",
+                            "block_type": "text",
+                            "bounding_box": {"x": 360, "y": 447, "w": 100, "h": 18},
+                        },
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pdf_extract_module._normalize_markdown_artifacts(tmp_path)
+
+    normalized = markdown_path.read_text(encoding="utf-8")
+    assert "\u4e22\u5931\u7684\u65e7\u6587\u672c" not in normalized
+    assert normalized.count("\u672c\u6587\u4ef6\u5df2\u7531") == 2
+    assert "\u672c\u6587\u4ef6\u5df2\u7531 | \u672c\u6587\u4ef6\u5df2\u7531" in normalized
+    assert (
+        "\u56db\u5ddd\u4e2d\u5b9e\u519c\u4e1a\u53d1\u5c55\u6709\u9650\u516c\u53f8 | "
+        "\u9ed1\u9f99\u6c5f\u7701\u6cf0\u91d1\u5efa\u7b51\u5de5\u7a0b\u6709\u9650\u516c\u53f8"
+    ) in normalized
+    assert (
+        "\u7535\u5b50\u8425\u4e1a\u6267\u7167\u7b7e\u7ae0 | \u7535\u5b50\u8425\u4e1a\u6267\u7167\u7b7e\u7ae0"
+    ) in normalized
+    assert "2025-08-2915:28:37 | 2025-08-2815:17:11" in normalized
+    assert normalized.rstrip().endswith("2025\u5e747\u670822\u65e5")
+
+
 def test_markdown_normalization_rebuilds_markdown_table_from_paddle_cells(tmp_path: Path) -> None:
     markdown_path = tmp_path / "0077.md"
     markdown_path.write_text(

@@ -1537,16 +1537,21 @@ def _replace_markdown_with_paddle_text_if_available(markdown_path: Path, markdow
     provider = str(payload.get("provider") or "")
     mode = str(payload.get("mode") or "")
 
+    table_markdowns = _paddle_table_markdown_blocks(payload)
+    if table_markdowns:
+        return _replace_markdown_table_blocks(markdown, table_markdowns)
+
+    lines = _paddle_markdown_body_lines(payload)
+    if not lines:
+        return markdown
+
     if provider == "paddleocr_ppocrv5_paddleocr_vl_seal" or mode == "seal_vl_crops_ppocrv5":
-        lines = _paddle_markdown_body_lines(payload)
-        if not lines:
-            return markdown
         return "\n\n".join(lines).strip() + "\n"
 
-    table_markdowns = _paddle_table_markdown_blocks(payload)
-    if not table_markdowns:
-        return markdown
-    return _replace_markdown_table_blocks(markdown, table_markdowns)
+    if provider.startswith("paddleocr_ppocrv5") or mode == "ppocrv5":
+        return "\n\n".join(lines).strip() + "\n"
+
+    return markdown
 
 
 def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
@@ -1555,7 +1560,6 @@ def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
         return []
 
     lines: list[str] = []
-    seen: set[str] = set()
     for _, raw_blocks in sorted(
         text_blocks_by_page.items(),
         key=lambda item: _safe_int(item[0]),
@@ -1568,17 +1572,94 @@ def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
             if isinstance(block, Mapping)
             and str(block.get("block_type") or "").strip().lower() != "seal_text"
         ]
-        blocks.sort(key=lambda block: _markdown_block_sort_key(block))
+        blocks.sort(key=_markdown_block_sort_key)
+        unique_blocks: list[Mapping[str, Any]] = []
+        seen: set[tuple[str, int, int, int, int]] = set()
         for block in blocks:
             text = _normalize_markdown_body_line(str(block.get("text") or ""))
             if not text:
                 continue
-            dedupe_key = _normalize_markdown_body_line(text)
+            dedupe_key = _paddle_text_block_dedupe_key(block, text)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            lines.append(text)
+            unique_blocks.append(block)
+
+        for row_blocks in _group_paddle_text_blocks_by_row(unique_blocks):
+            line = _render_paddle_text_row(row_blocks)
+            if line:
+                lines.append(line)
     return lines
+
+
+def _paddle_text_block_dedupe_key(
+    block: Mapping[str, Any],
+    text: str,
+) -> tuple[str, int, int, int, int]:
+    x, y, w, h = _markdown_block_box(block)
+    return (text, x // 4, y // 4, max(1, w) // 4, max(1, h) // 4)
+
+
+def _group_paddle_text_blocks_by_row(
+    blocks: list[Mapping[str, Any]],
+) -> list[list[Mapping[str, Any]]]:
+    rows: list[list[Mapping[str, Any]]] = []
+    for block in sorted(blocks, key=_markdown_block_sort_key):
+        if not rows or not _paddle_text_block_belongs_to_row(rows[-1], block):
+            rows.append([block])
+            continue
+        rows[-1].append(block)
+        rows[-1].sort(key=_markdown_block_sort_key)
+    return rows
+
+
+def _paddle_text_block_belongs_to_row(
+    row_blocks: list[Mapping[str, Any]],
+    block: Mapping[str, Any],
+) -> bool:
+    if not row_blocks:
+        return False
+
+    row_tops: list[int] = []
+    row_bottoms: list[int] = []
+    row_centers: list[float] = []
+    row_heights: list[int] = []
+    for row_block in row_blocks:
+        _, y, _, h = _markdown_block_box(row_block)
+        row_tops.append(y)
+        row_bottoms.append(y + h)
+        row_centers.append(y + h / 2.0)
+        row_heights.append(max(1, h))
+
+    _, candidate_y, _, candidate_h = _markdown_block_box(block)
+    candidate_bottom = candidate_y + candidate_h
+    candidate_center = candidate_y + candidate_h / 2.0
+
+    row_top = min(row_tops)
+    row_bottom = max(row_bottoms)
+    row_height = max(1, row_bottom - row_top)
+    average_height = max(1, int(sum(row_heights) / len(row_heights)))
+    row_center = sum(row_centers) / len(row_centers)
+
+    vertical_overlap = min(row_bottom, candidate_bottom) - max(row_top, candidate_y)
+    center_tolerance = max(12, min(average_height, max(1, candidate_h)))
+
+    return vertical_overlap >= min(row_height, max(1, candidate_h)) * 0.25 or (
+        abs(candidate_center - row_center) <= center_tolerance
+    )
+
+
+def _render_paddle_text_row(row_blocks: list[Mapping[str, Any]]) -> str:
+    fragments = [
+        _normalize_markdown_body_line(str(block.get("text") or ""))
+        for block in sorted(row_blocks, key=_markdown_block_sort_key)
+    ]
+    parts = [fragment for fragment in fragments if fragment]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return " | ".join(parts)
 
 
 def _paddle_table_markdown_blocks(payload: Mapping[str, Any]) -> list[str]:
@@ -1677,10 +1758,20 @@ def _split_trailing_footer_after_markdown_table(markdown: str) -> str:
 
 
 def _markdown_block_sort_key(block: Mapping[str, Any]) -> tuple[int, int]:
+    x, y, _, _ = _markdown_block_box(block)
+    return (y, x)
+
+
+def _markdown_block_box(block: Mapping[str, Any]) -> tuple[int, int, int, int]:
     bbox = block.get("bounding_box")
     if not isinstance(bbox, Mapping):
-        return (0, 0)
-    return (_safe_int(bbox.get("y")), _safe_int(bbox.get("x")))
+        return (0, 0, 0, 0)
+    return (
+        _safe_int(bbox.get("x")),
+        _safe_int(bbox.get("y")),
+        max(0, _safe_int(bbox.get("w"))),
+        max(0, _safe_int(bbox.get("h"))),
+    )
 
 
 def _normalize_markdown_body_line(text: str) -> str:
