@@ -4,7 +4,11 @@ from collections.abc import Iterable as IterableABC
 from collections.abc import Mapping
 from dataclasses import dataclass
 import time
-from typing import Iterator, Literal, Optional, Self
+from typing import Iterator, Literal, Optional
+try:
+    from typing import Self
+except ImportError:  # Python < 3.11
+    from typing_extensions import Self
 
 # [核心契约层] 定义了数据流的协议，确保不同 Operator 之间能“听懂”对方的话
 from .contracts import (

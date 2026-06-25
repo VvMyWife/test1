@@ -16,7 +16,11 @@ try:
 except ImportError:  # Python < 3.11
     class StrEnum(str, Enum):
         pass
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal
+try:
+    from typing import Self
+except ImportError:  # Python < 3.11
+    from typing_extensions import Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
