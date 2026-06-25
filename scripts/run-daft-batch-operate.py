@@ -25,8 +25,12 @@ def main() -> None:
     parser.add_argument(
         "--table-engine",
         default=os.environ.get("MINERU_TABLE_ENGINE", "ocr"),
-        choices=("ocr", "paddle"),
-        help="Use ocr for pure MinerU, or paddle for PaddleOCR table refinement.",
+        choices=("ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"),
+        help=(
+            "Use ocr/ocr_pipeline for MinerU pipeline, "
+            "ocr_vl for MinerU VLM, ocr_hybrid for MinerU hybrid, "
+            "or paddle for PaddleOCR table refinement."
+        ),
     )
     parser.add_argument(
         "--use-paddle-tables",

@@ -14,6 +14,8 @@ from .mineru_layout import MinerULayoutOperateResult, operate
 
 DEFAULT_MINERU_API_URL = "http://127.0.0.1:18000"
 DEFAULT_TIMEOUT_SECONDS = 1800.0
+DEFAULT_HYBRID_EFFORT = "medium"
+SUPPORTED_TABLE_ENGINES = {"ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"}
 
 
 class MinerUPdfPage(BaseModel):
@@ -42,6 +44,15 @@ class MinerUPdfResult(BaseModel):
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     parsed_pdf: ParsedPdf
     pages: list[MinerUPdfPage] = Field(default_factory=list)
+
+
+class MinerUTableEngineResolution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requested_table_engine: str
+    canonical_table_engine: str
+    mineru_backend: str
+    extra_args_suffix: list[str] = Field(default_factory=list)
 
 
 def extract_pdf(
@@ -132,20 +143,27 @@ def _build_mineru_options(
     options: dict[str, Any] = dict(mineru_options or {})
     if output_dir is not None:
         options["output_dir"] = str(Path(output_dir).expanduser().resolve())
+    resolution = resolve_mineru_table_engine(
+        str(options.get("table_engine") or table_engine or "ocr")
+    )
     options.setdefault("parse_method", parse_method)
-    options.setdefault("backend", backend)
+    options.setdefault("backend", resolution.mineru_backend or backend)
     options.setdefault("lang", lang)
     options.setdefault("timeout_seconds", timeout_seconds)
     options.setdefault("api_url", _resolve_api_url(api_url))
-    resolved_table_engine = str(options.get("table_engine") or table_engine).strip().lower()
-    if resolved_table_engine not in {"ocr", "paddle"}:
-        raise ValueError("table_engine must be 'ocr' or 'paddle'")
-    options["table_engine"] = resolved_table_engine
+    options["table_engine"] = resolution.canonical_table_engine
     if extra_args is None:
-        options.setdefault("extra_args", ["--formula", "false", "--table", "true"])
+        extra_args_value = ["--formula", "false", "--table", "true"]
     else:
-        options.setdefault("extra_args", list(extra_args))
-    if resolved_table_engine == "paddle":
+        extra_args_value = list(extra_args)
+    if resolution.extra_args_suffix:
+        existing_args = {str(arg).strip().lower() for arg in extra_args_value}
+        for index, arg in enumerate(resolution.extra_args_suffix):
+            if index % 2 == 0 and str(arg).strip().lower() in existing_args:
+                continue
+            extra_args_value.append(arg)
+    options.setdefault("extra_args", extra_args_value)
+    if resolution.canonical_table_engine == "paddle":
         options.setdefault("enable_table_cell_refine", True)
         options.setdefault("enable_paddle_table_refine", True)
         options.setdefault("table_cell_refine_fail_open", False)
@@ -157,6 +175,27 @@ def _build_mineru_options(
         options.setdefault("enable_table_cell_refine", False)
         options.setdefault("enable_paddle_table_refine", False)
     return options
+
+
+def resolve_mineru_table_engine(table_engine: str | None) -> MinerUTableEngineResolution:
+    requested = str(table_engine or "ocr").strip().lower()
+    alias_map = {
+        "ocr": ("ocr", "pipeline", []),
+        "ocr_pipeline": ("ocr", "pipeline", []),
+        "ocr_vl": ("ocr", "vlm-engine", []),
+        "ocr_hybrid": ("ocr", "hybrid-engine", ["--effort", DEFAULT_HYBRID_EFFORT]),
+        "paddle": ("paddle", "pipeline", []),
+    }
+    if requested not in alias_map:
+        supported = "', '".join(sorted(SUPPORTED_TABLE_ENGINES))
+        raise ValueError(f"table_engine must be one of '{supported}'")
+    canonical, backend, extra_args_suffix = alias_map[requested]
+    return MinerUTableEngineResolution(
+        requested_table_engine=requested,
+        canonical_table_engine=canonical,
+        mineru_backend=backend,
+        extra_args_suffix=list(extra_args_suffix),
+    )
 
 
 def _resolve_api_url(api_url: str | None) -> str:

@@ -25,6 +25,7 @@ from .pure_mineru import (
     DEFAULT_TIMEOUT_SECONDS,
     dump_pure_mineru_json,
     extract_pdf,
+    resolve_mineru_table_engine,
 )
 
 JsonDict = dict[str, Any]
@@ -179,8 +180,11 @@ class MinerUPdfFileOperator:
             use_paddle_tables=use_paddle_tables,
             table_engine=table_engine,
         )
-        resolved_extra_args = (
-            list(extra_args) if extra_args is not None else self._default_extra_args(resolved_table_engine)
+        table_resolution = resolve_mineru_table_engine(resolved_table_engine)
+        resolved_backend = table_resolution.mineru_backend or self.backend
+        resolved_extra_args = _merge_mineru_extra_args(
+            list(extra_args) if extra_args is not None else self._default_extra_args(resolved_table_engine),
+            table_resolution.extra_args_suffix,
         )
 
         if overwrite:
@@ -207,7 +211,7 @@ class MinerUPdfFileOperator:
             options.update(
                 {
                     "table_engine": resolved_table_engine,
-                    "backend": self.backend,
+                    "backend": resolved_backend,
                     "parse_method": self.parse_method,
                     "lang": self.lang,
                     "extra_args": resolved_extra_args,
@@ -227,7 +231,7 @@ class MinerUPdfFileOperator:
                 api_url=self.api_url,
                 timeout_seconds=self.timeout_seconds,
                 parse_method=self.parse_method,
-                backend=self.backend,
+                backend=resolved_backend,
                 lang=self.lang,
                 extra_args=resolved_extra_args,
                 table_engine=resolved_table_engine,
@@ -298,7 +302,7 @@ class MinerUPdfFileOperator:
                 table_engine=resolved_table_engine,
                 paddle_table_mode=paddle_table_mode if resolved_table_engine == "paddle" else None,
                 paddle_table_artifact=_find_artifact_uri(parsed.artifacts, "paddle_table_json"),
-                mineru_backend=self.backend,
+                mineru_backend=resolved_backend,
                 mineru_parse_method=self.parse_method,
                 mineru_lang=self.lang,
                 mineru_extra_args=resolved_extra_args,
@@ -329,7 +333,7 @@ class MinerUPdfFileOperator:
                 wall_elapsed_seconds=round(processing_seconds + queue_wait_seconds, 3),
                 table_engine=resolved_table_engine,
                 paddle_table_mode=paddle_table_mode if resolved_table_engine == "paddle" else None,
-                mineru_backend=self.backend,
+                mineru_backend=resolved_backend,
                 mineru_parse_method=self.parse_method,
                 mineru_lang=self.lang,
                 mineru_extra_args=resolved_extra_args,
@@ -357,7 +361,7 @@ class MinerUPdfFileOperator:
     def _resolve_mineru_table_enable(self, table_engine: str) -> bool:
         if self.mineru_table_enable is not None:
             return self.mineru_table_enable
-        return table_engine in {"ocr", "paddle"}
+        return table_engine in {"ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"}
 
     def _operator_factory_for(self, table_engine: str) -> Callable[[], LayoutExtractMinerUOperator]:
         if self.operator_factory is not None:
@@ -452,6 +456,7 @@ class MinerUPdfDirBatchOperator:
             use_paddle_tables=use_paddle_tables,
             table_engine=table_engine,
         )
+        resolved_backend = resolve_mineru_table_engine(resolved_table_engine).mineru_backend
         selected_engine = _resolve_batch_engine(engine=engine, concurrency=concurrency)
         resolved_field_keywords = _normalize_field_keywords(field_keywords)
         tasks = [
@@ -705,6 +710,7 @@ class MinerUPdfDirBatchOperator:
         total_elapsed_seconds = round(time.perf_counter() - started_at, 3)
         page_count = sum(item.page_count for item in items if item.success)
         seconds_per_page = round(total_elapsed_seconds / page_count, 3) if page_count > 0 else 0.0
+        table_resolution = resolve_mineru_table_engine(table_engine)
         report = PdfDirExtractReport(
             engine=engine,
             input=str(input_root),
@@ -713,10 +719,13 @@ class MinerUPdfDirBatchOperator:
             api_url=self.file_operator.api_url,
             concurrency=concurrency,
             timeout_seconds=self.file_operator.timeout_seconds,
-            mineru_backend=self.file_operator.backend,
+            mineru_backend=table_resolution.mineru_backend,
             mineru_parse_method=self.file_operator.parse_method,
             mineru_lang=self.file_operator.lang,
-            mineru_extra_args=self.file_operator._default_extra_args(table_engine),
+            mineru_extra_args=_merge_mineru_extra_args(
+                self.file_operator._default_extra_args(table_engine),
+                table_resolution.extra_args_suffix,
+            ),
             table_engine=table_engine,
             paddle_table_mode=paddle_table_mode if table_engine == "paddle" else None,
             paddle_device=paddle_device,
@@ -941,9 +950,30 @@ def _resolve_table_engine(*, use_paddle_tables: bool | None, table_engine: str |
         resolved = "paddle" if use_paddle_tables else "ocr"
     else:
         resolved = table_engine.strip().lower()
-    if resolved not in {"ocr", "paddle"}:
-        raise ValueError("table_engine must be 'ocr' or 'paddle'")
+    supported = {"ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"}
+    if resolved not in supported:
+        supported_text = "', '".join(sorted(supported))
+        raise ValueError(f"table_engine must be one of '{supported_text}'")
     return resolved
+
+
+def _merge_mineru_extra_args(base_args: Sequence[str], suffix_args: Sequence[str]) -> list[str]:
+    merged = [str(arg) for arg in base_args]
+    if not suffix_args:
+        return merged
+    existing_flags = {item.strip().lower() for item in merged[::2] if isinstance(item, str)}
+    index = 0
+    while index < len(suffix_args):
+        flag = str(suffix_args[index])
+        if flag.strip().lower() in existing_flags:
+            index += 2
+            continue
+        merged.append(flag)
+        if index + 1 < len(suffix_args):
+            merged.append(str(suffix_args[index + 1]))
+        existing_flags.add(flag.strip().lower())
+        index += 2
+    return merged
 
 
 def _resolve_batch_engine(*, engine: str, concurrency: int) -> str:
@@ -996,6 +1026,7 @@ def _result_from_existing_json(
     field_annotation_pdf_path = _artifact_uri(artifacts, "field_annotation_pdf")
     resolved_field_keywords = _normalize_field_keywords(field_keywords)
     field_summary = _read_field_coordinate_summary(field_coordinates_path)
+    table_resolution = resolve_mineru_table_engine(table_engine)
     if resolved_field_keywords:
         existing_keywords = _normalize_field_keywords(field_summary.get("field_keywords"))
         if (
@@ -1023,10 +1054,13 @@ def _result_from_existing_json(
         table_cell_count=sum(len(table.get("cells") or []) for table in table_blocks),
         table_engine=table_engine,
         paddle_table_mode=paddle_table_mode if table_engine == "paddle" else None,
-        mineru_backend=file_operator.backend,
+        mineru_backend=table_resolution.mineru_backend,
         mineru_parse_method=file_operator.parse_method,
         mineru_lang=file_operator.lang,
-        mineru_extra_args=file_operator._default_extra_args(table_engine),
+        mineru_extra_args=_merge_mineru_extra_args(
+            file_operator._default_extra_args(table_engine),
+            table_resolution.extra_args_suffix,
+        ),
         api_url=file_operator.api_url,
         input_type="image" if _is_image_file(pdf_path) else "pdf",
         converted_pdf_path=converted_pdf_path,

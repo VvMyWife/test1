@@ -1310,6 +1310,46 @@ def test_pure_mineru_options_default_to_ocr_table_engine() -> None:
     assert "paddle_table_mode" not in options
 
 
+def test_pure_mineru_options_map_ocr_vl_to_vlm_backend() -> None:
+    options = _build_mineru_options(
+        output_dir=None,
+        api_url="http://127.0.0.1:8000",
+        timeout_seconds=1800.0,
+        parse_method="auto",
+        backend="pipeline",
+        lang="ch",
+        extra_args=None,
+        table_engine="ocr_vl",
+        paddle_table_mode="ppstructurev3",
+        paddle_device=None,
+        mineru_options=None,
+    )
+
+    assert options["table_engine"] == "ocr"
+    assert options["backend"] == "vlm-engine"
+    assert options["extra_args"] == ["--formula", "false", "--table", "true"]
+
+
+def test_pure_mineru_options_map_ocr_hybrid_to_hybrid_backend() -> None:
+    options = _build_mineru_options(
+        output_dir=None,
+        api_url="http://127.0.0.1:8000",
+        timeout_seconds=1800.0,
+        parse_method="auto",
+        backend="pipeline",
+        lang="ch",
+        extra_args=None,
+        table_engine="ocr_hybrid",
+        paddle_table_mode="ppstructurev3",
+        paddle_device=None,
+        mineru_options=None,
+    )
+
+    assert options["table_engine"] == "ocr"
+    assert options["backend"] == "hybrid-engine"
+    assert options["extra_args"] == ["--formula", "false", "--table", "true", "--effort", "medium"]
+
+
 def test_cleanup_mineru_api_task_dirs_removes_matching_uuid_upload(tmp_path: Path) -> None:
     output_root = tmp_path / "output"
     final_output_dir = output_root / "business" / "doc"

@@ -12,6 +12,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
 ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+ARG MINERU_VERSION=3.4.0
 ARG TORCH_VERSION=2.10.0+cu130
 ARG TORCHVISION_VERSION=0.25.0+cu130
 ARG TORCHAUDIO_VERSION=2.10.0+cu130
@@ -72,7 +73,7 @@ RUN /opt/venvs/mineru/bin/python -m pip install \
         torchaudio=="${TORCHAUDIO_VERSION}" \
     && /opt/venvs/mineru/bin/python -m pip install \
         -i "${PIP_INDEX_URL}" \
-        "mineru[pipeline]==3.1.6" \
+        "mineru[all]==${MINERU_VERSION}" \
         daft==0.7.11 \
         fastapi==0.136.1 \
         uvicorn==0.46.0

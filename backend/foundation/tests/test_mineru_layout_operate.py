@@ -837,7 +837,47 @@ def test_file_operator_enables_mineru_table_predict_for_ocr_mode() -> None:
     operator = MinerUPdfFileOperator()
 
     assert operator._default_extra_args("ocr") == ["--formula", "false", "--table", "true"]
+    assert operator._default_extra_args("ocr_pipeline") == ["--formula", "false", "--table", "true"]
+    assert operator._default_extra_args("ocr_vl") == ["--formula", "false", "--table", "true"]
+    assert operator._default_extra_args("ocr_hybrid") == ["--formula", "false", "--table", "true"]
     assert operator._default_extra_args("paddle") == ["--formula", "false", "--table", "true"]
+
+
+def test_extract_pdf_file_reports_vlm_backend_for_ocr_vl_mode(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "input" / "demo.pdf"
+    pdf_path.parent.mkdir()
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    artifact = ArtifactRef(kind="middle_json", uri="/tmp/doc_middle.json")
+
+    class _FakeOperator:
+        def process(self, ctx, items, path):  # noqa: ANN001
+            document = next(items)
+            assert document["meta"]["mineru_options"]["backend"] == "vlm-engine"
+            assert document["meta"]["mineru_options"]["table_engine"] == "ocr"
+            yield PageItem(
+                archive_id=document["archive_id"],
+                archive_owner_user_id=document["archive_owner_user_id"],
+                triggered_by_user_id=document["triggered_by_user_id"],
+                doc_id=document["doc_id"],
+                page_index=0,
+                text="hello",
+                layout_ref=artifact,
+                page_meta={
+                    "coord_space": "mineru_layout",
+                    "mineru_artifacts": [artifact.model_dump(mode="python")],
+                },
+            ).model_dump(mode="python")
+
+    result = extract_pdf_file(
+        pdf_path,
+        output_dir=tmp_path / "output",
+        operator_factory=_FakeOperator,
+        table_engine="ocr_vl",
+    )
+
+    assert result.success is True
+    assert result.table_engine == "ocr_vl"
+    assert result.mineru_backend == "vlm-engine"
 
 
 def test_extract_pdf_dir_writes_batch_reports_and_skips_existing_json(tmp_path: Path) -> None:
