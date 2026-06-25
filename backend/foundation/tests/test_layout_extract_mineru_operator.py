@@ -652,6 +652,41 @@ def test_parse_paddle_structure_tables_uses_cell_boxes_as_true_cells() -> None:
     assert parsed.meta["cell_count"] == 2
 
 
+def test_parse_paddle_structure_tables_interleaves_vertical_fragment_columns() -> None:
+    parsed = parse_paddle_structure_tables(
+        [
+            {
+                "page_index": 0,
+                "width": 200,
+                "height": 240,
+                "table_res_list": [
+                    {
+                        "cell_box_list": [
+                            [0, 0, 80, 140],
+                        ],
+                        "table_ocr_pred": {
+                            "rec_texts": ["ace", "bdf", "gh", "ij", "klm"],
+                            "rec_scores": [0.99, 0.99, 0.98, 0.98, 0.98],
+                            "rec_boxes": [
+                                [10, 10, 34, 82],
+                                [36, 10, 60, 82],
+                                [18, 84, 52, 106],
+                                [14, 108, 56, 130],
+                                [10, 132, 62, 154],
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+        target_page_sizes={0: ImageSize(width=200, height=240)},
+    )
+
+    table = parsed.tables_by_page[0][0]
+    assert len(table.cells) == 1
+    assert table.cells[0].text == "abcdefghijklm"
+
+
 def test_parse_paddle_structure_tables_merges_wrapped_html_cell_text() -> None:
     parsed = parse_paddle_structure_tables(
         [

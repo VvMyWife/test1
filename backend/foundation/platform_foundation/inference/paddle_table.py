@@ -1908,8 +1908,7 @@ def _fill_cell_text_from_ocr_fragments(
     for cell_index, hits in assignments.items():
         if not hits:
             continue
-        hits.sort(key=lambda item: _cell_fragment_sort_key(item["bounding_box"]))
-        text = _normalize_table_cell_text("".join(str(item.get("text") or "") for item in hits))
+        text = _compose_cell_text_from_hits(hits)
         if not text:
             continue
         candidate = candidates[cell_index]
@@ -1923,6 +1922,54 @@ def _fill_cell_text_from_ocr_fragments(
         meta["ocr_fragment_indexes"] = [int(item["source_index"]) for item in hits]
         meta["ocr_fragment_bbox_source"] = bbox_source
         candidate["meta"] = meta
+
+
+def _compose_cell_text_from_hits(hits: Sequence[Mapping[str, Any]]) -> str:
+    expanded_hits: list[JsonDict] = []
+    for hit in hits:
+        expanded_hits.extend(_expand_vertical_cell_fragment(hit))
+    expanded_hits.sort(key=lambda item: _cell_fragment_sort_key(item["bounding_box"]))
+    return _normalize_table_cell_text("".join(str(item.get("text") or "") for item in expanded_hits))
+
+
+def _expand_vertical_cell_fragment(hit: Mapping[str, Any]) -> list[JsonDict]:
+    text = str(hit.get("text") or "")
+    box = hit.get("bounding_box")
+    if not isinstance(box, BoundingBox):
+        return [dict(hit)]
+    if not _should_expand_vertical_fragment(text, box):
+        return [dict(hit)]
+
+    char_count = len(text)
+    step = max(1.0, float(box.h) / max(1, char_count))
+    expanded: list[JsonDict] = []
+    for index, char in enumerate(text):
+        y0 = int(round(box.y + step * index))
+        y1 = int(round(box.y + step * (index + 1)))
+        char_box = BoundingBox(
+            x=int(box.x),
+            y=y0,
+            w=int(box.w),
+            h=max(1, y1 - y0),
+        )
+        item = dict(hit)
+        item["text"] = char
+        item["bounding_box"] = char_box
+        expanded.append(item)
+    return expanded
+
+
+def _should_expand_vertical_fragment(text: str, box: BoundingBox) -> bool:
+    value = str(text or "").strip()
+    if len(value) < 2:
+        return False
+    if box.w <= 0 or box.h <= 0:
+        return False
+    avg_char_height = float(box.h) / float(len(value))
+    ratio = avg_char_height / max(1.0, float(box.w))
+    if ratio < 0.55 or ratio > 1.8:
+        return False
+    return box.h > box.w * 1.1
 
 
 def _parse_ocr_payload_text_blocks(
