@@ -33,6 +33,7 @@ services:
       - "${MINERU_API_BIND:-0.0.0.0}:${MINERU_API_HOST_PORT:-18000}:8000"
       - "${PADDLE_TABLE_API_BIND:-0.0.0.0}:${PADDLE_TABLE_API_HOST_PORT:-18200}:8200"
     volumes:
+      - .:/opt/mineru_workspace
       - ./data/input:/workspace/input
       - ./output:/workspace/output
       - ./.cache/mineru-operator:/workspace/.cache
