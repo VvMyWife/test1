@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -1534,13 +1535,17 @@ def _replace_markdown_with_paddle_text_if_available(markdown_path: Path, markdow
 
     provider = str(payload.get("provider") or "")
     mode = str(payload.get("mode") or "")
-    if provider != "paddleocr_ppocrv5_paddleocr_vl_seal" and mode != "seal_vl_crops_ppocrv5":
-        return markdown
 
-    lines = _paddle_markdown_body_lines(payload)
-    if not lines:
+    if provider == "paddleocr_ppocrv5_paddleocr_vl_seal" or mode == "seal_vl_crops_ppocrv5":
+        lines = _paddle_markdown_body_lines(payload)
+        if not lines:
+            return markdown
+        return "\n\n".join(lines).strip() + "\n"
+
+    table_markdowns = _paddle_table_markdown_blocks(payload)
+    if not table_markdowns:
         return markdown
-    return "\n\n".join(lines).strip() + "\n"
+    return _replace_markdown_table_blocks(markdown, table_markdowns)
 
 
 def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
@@ -1573,6 +1578,96 @@ def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
             seen.add(dedupe_key)
             lines.append(text)
     return lines
+
+
+def _paddle_table_markdown_blocks(payload: Mapping[str, Any]) -> list[str]:
+    tables_by_page = payload.get("tables_by_page")
+    if not isinstance(tables_by_page, Mapping):
+        return []
+
+    markdown_blocks: list[str] = []
+    for _, raw_tables in sorted(
+        tables_by_page.items(),
+        key=lambda item: _safe_int(item[0]),
+    ):
+        if not isinstance(raw_tables, list):
+            continue
+        tables = [table for table in raw_tables if isinstance(table, Mapping)]
+        tables.sort(key=_markdown_block_sort_key)
+        for table in tables:
+            rows = _paddle_table_rows(table)
+            if not rows:
+                continue
+            markdown = _render_markdown_table(rows).strip()
+            if markdown:
+                markdown_blocks.append(markdown)
+    return markdown_blocks
+
+
+def _paddle_table_rows(table: Mapping[str, Any]) -> list[list[str]]:
+    raw_cells = table.get("cells")
+    if not isinstance(raw_cells, list):
+        return []
+
+    grouped_cells: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    row_positions: dict[int, int] = {}
+    for raw_cell in raw_cells:
+        if not isinstance(raw_cell, Mapping):
+            continue
+        row_index = _safe_int(raw_cell.get("row_index"))
+        grouped_cells[row_index].append(raw_cell)
+        bbox = raw_cell.get("bounding_box")
+        y = _safe_int(bbox.get("y")) if isinstance(bbox, Mapping) else 0
+        row_positions[row_index] = min(row_positions.get(row_index, y), y)
+
+    if not grouped_cells:
+        return []
+
+    rows: list[list[str]] = []
+    for row_index in sorted(grouped_cells, key=lambda idx: (idx, row_positions.get(idx, 0))):
+        sorted_cells = sorted(
+            grouped_cells[row_index],
+            key=lambda cell: _paddle_table_cell_sort_key(cell),
+        )
+        row: list[str] = []
+        for cell in sorted_cells:
+            text = _normalize_markdown_table_cell(str(cell.get("text") or ""))
+            span = max(1, _safe_int(cell.get("col_span")))
+            row.append(text)
+            if span > 1:
+                row.extend("" for _ in range(span - 1))
+        if any(cell for cell in row):
+            rows.append(row)
+    return rows
+
+
+def _paddle_table_cell_sort_key(cell: Mapping[str, Any]) -> tuple[int, int, int]:
+    bbox = cell.get("bounding_box")
+    x = _safe_int(bbox.get("x")) if isinstance(bbox, Mapping) else 0
+    return (x, _safe_int(cell.get("col_index")), _safe_int(cell.get("row_index")))
+
+
+def _replace_markdown_table_blocks(markdown: str, table_markdowns: list[str]) -> str:
+    if not table_markdowns:
+        return markdown
+
+    table_pattern = re.compile(
+        r"(?ms)(^\|.*\|\s*$\n^\|(?:\s*:?-{3,}:?\s*\|)+\s*$\n(?:^\|.*\|\s*$\n?)*)"
+    )
+    index = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal index
+        if index >= len(table_markdowns):
+            return match.group(0)
+        replacement = table_markdowns[index]
+        index += 1
+        return replacement
+
+    updated = table_pattern.sub(_replace, markdown)
+    if index == 0:
+        return markdown
+    return updated
 
 
 def _markdown_block_sort_key(block: Mapping[str, Any]) -> tuple[int, int]:
