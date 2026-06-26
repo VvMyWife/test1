@@ -5,7 +5,7 @@
 #
 # Keeping Paddle and Torch in separate environments avoids the cuDNN/NCCL wheel
 # conflicts seen when installing both stacks into a single Python environment.
-ARG BASE_IMAGE=nvidia/cuda:13.0.0-runtime-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu22.04
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -42,6 +42,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         bash \
         ca-certificates \
         curl \
@@ -55,6 +56,7 @@ RUN apt-get update \
         libxrender1 \
         poppler-utils \
         python3 \
+        python3-dev \
         python3-pip \
         python3-venv \
         tini \

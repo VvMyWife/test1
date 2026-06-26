@@ -25,6 +25,7 @@ export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/.cache/huggingface}"
 export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${WORKSPACE_ROOT}/.cache/modelscope}"
 export TORCH_HOME="${TORCH_HOME:-${WORKSPACE_ROOT}/.cache/torch}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/.cache/pip}"
+export MINERU_VLM_GPU_MEMORY_UTILIZATION="${MINERU_VLM_GPU_MEMORY_UTILIZATION:-0.45}"
 
 mkdir -p "${WORKSPACE_ROOT}/input" "${WORKSPACE_ROOT}/output" "${WORKSPACE_ROOT}/logs" "${WORKSPACE_ROOT}/run" "${XDG_CACHE_HOME}"
 
@@ -33,6 +34,32 @@ paddle_pid=""
 
 log() {
   printf '[mineru-docker] %s\n' "$*"
+}
+
+patch_mineru_vlm_memory_utilization() {
+  local target="${MINERU_VENV}/lib/python3.10/site-packages/mineru/backend/vlm/utils.py"
+  if [[ ! -f "${target}" ]]; then
+    log "skip MinerU VLM memory patch; file not found: ${target}"
+    return
+  fi
+
+  MINERU_PATCH_TARGET="${target}" "${MINERU_VENV}/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["MINERU_PATCH_TARGET"])
+text = path.read_text(encoding="utf-8")
+old = '    default_gpu_memory_utilization = 0.5\n'
+new = '    default_gpu_memory_utilization = float(os.getenv("MINERU_VLM_GPU_MEMORY_UTILIZATION", "0.45"))\n'
+
+if new in text:
+    raise SystemExit(0)
+if old not in text:
+    raise SystemExit("target pattern not found in MinerU VLM utils.py")
+
+path.write_text(text.replace(old, new, 1), encoding="utf-8")
+PY
+  log "patched MinerU default VLM gpu_memory_utilization=${MINERU_VLM_GPU_MEMORY_UTILIZATION}"
 }
 
 configure_cuda_visible_devices() {
@@ -88,6 +115,7 @@ start_mineru_api() {
     return
   fi
   local mineru_device_mode="${MINERU_API_DEVICE_MODE:-${MINERU_DEVICE_MODE:-cuda}}"
+  patch_mineru_vlm_memory_utilization
   log "starting mineru-api at ${MINERU_API_URL} device=${mineru_device_mode}"
   MINERU_DEVICE_MODE="${mineru_device_mode}" "${MINERU_VENV}/bin/mineru-api" \
     --host "${MINERU_API_HOST}" \
