@@ -17,8 +17,8 @@ export MINERU_API_URL
 export PADDLE_TABLE_API_URL
 export MINERU_MODEL_SOURCE="${MINERU_MODEL_SOURCE:-modelscope}"
 export MINERU_API_MAX_CONCURRENT_REQUESTS="${MINERU_API_MAX_CONCURRENT_REQUESTS:-128}"
-export MINERU_API_PRELOAD="${MINERU_API_PRELOAD:-${MINERU_API_ENABLE_VLM_PRELOAD:-false}}"
-export MINERU_API_ENABLE_VLM_PRELOAD="${MINERU_API_ENABLE_VLM_PRELOAD:-${MINERU_API_PRELOAD:-false}}"
+export MINERU_API_PRELOAD="${MINERU_API_PRELOAD:-${MINERU_API_ENABLE_VLM_PRELOAD:-true}}"
+export MINERU_API_ENABLE_VLM_PRELOAD="${MINERU_API_ENABLE_VLM_PRELOAD:-${MINERU_API_PRELOAD:-true}}"
 export MINERU_API_STARTUP_TIMEOUT_SECONDS="${MINERU_API_STARTUP_TIMEOUT_SECONDS:-1800}"
 export PADDLE_TABLE_API_PRELOAD="${PADDLE_TABLE_API_PRELOAD:-true}"
 export PADDLE_TABLE_API_PRELOAD_MODES="${PADDLE_TABLE_API_PRELOAD_MODES:-table_structure}"
@@ -28,7 +28,7 @@ export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/.cache/huggingface}"
 export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${WORKSPACE_ROOT}/.cache/modelscope}"
 export TORCH_HOME="${TORCH_HOME:-${WORKSPACE_ROOT}/.cache/torch}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/.cache/pip}"
-export MINERU_VLM_GPU_MEMORY_UTILIZATION="${MINERU_VLM_GPU_MEMORY_UTILIZATION:-0.35}"
+export MINERU_VLM_GPU_MEMORY_UTILIZATION="${MINERU_VLM_GPU_MEMORY_UTILIZATION:-0.45}"
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="${CUDA_PATH:-/usr/local/cuda}"
@@ -43,6 +43,17 @@ paddle_pid=""
 
 log() {
   printf '[mineru-docker] %s\n' "$*"
+}
+
+bool_true() {
+  case "${1:-}" in
+    true|TRUE|True|1|yes|YES|Yes|y|Y|on|ON|On)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 patch_mineru_vlm_memory_utilization() {
@@ -168,7 +179,7 @@ start_mineru_api() {
   fi
 
   local mineru_device_mode="${MINERU_API_DEVICE_MODE:-${MINERU_DEVICE_MODE:-cuda}}"
-  local vlm_preload="${MINERU_API_ENABLE_VLM_PRELOAD:-${MINERU_API_PRELOAD:-false}}"
+  local vlm_preload="${MINERU_API_ENABLE_VLM_PRELOAD:-${MINERU_API_PRELOAD:-true}}"
 
   patch_mineru_vlm_memory_utilization
   verify_vlm_build_toolchain

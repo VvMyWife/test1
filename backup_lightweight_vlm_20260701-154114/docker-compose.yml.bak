@@ -1,0 +1,42 @@
+services:
+  mineru-operator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        BASE_IMAGE: "${BASE_IMAGE:-nvidia/cuda:13.0.0-runtime-ubuntu22.04}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        PYTORCH_INDEX_URL: "${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+        PADDLE_INDEX_URL: "${PADDLE_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/stable/cu129/}"
+        TORCH_VERSION: "${TORCH_VERSION:-2.10.0+cu130}"
+        TORCHVISION_VERSION: "${TORCHVISION_VERSION:-0.25.0+cu130}"
+        TORCHAUDIO_VERSION: "${TORCHAUDIO_VERSION:-2.10.0+cu130}"
+    image: mineru-operator:latest
+    container_name: mineru-operator
+    restart: unless-stopped
+    gpus: all
+    shm_size: "8gb"
+    environment:
+      # Default true so one container can serve both OCR and Paddle modes.
+      ENABLE_PADDLE_API: "${ENABLE_PADDLE_API:-true}"
+      MINERU_API_MAX_CONCURRENT_REQUESTS: "${MINERU_API_MAX_CONCURRENT_REQUESTS:-128}"
+      PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS: "${PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS:-}"
+      ENABLE_PAGE_SCREENSHOTS: "${ENABLE_PAGE_SCREENSHOTS:-false}"
+      PAGE_SCREENSHOT_DPI: "${PAGE_SCREENSHOT_DPI:-144}"
+      MINERU_MODEL_SOURCE: "${MINERU_MODEL_SOURCE:-modelscope}"
+      MINERU_API_DEVICE_MODE: "${MINERU_API_DEVICE_MODE:-cuda}"
+      MINERU_PPSTRUCTURE_DEVICE: "${MINERU_PPSTRUCTURE_DEVICE:-gpu:0}"
+      PADDLE_TABLE_API_PRELOAD_MODES: "${PADDLE_TABLE_API_PRELOAD_MODES:-table_structure}"
+      PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS: "${PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS:-1800}"
+      MINERU_CUDA_VISIBLE_DEVICES: "${MINERU_CUDA_VISIBLE_DEVICES:-auto}"
+    ports:
+      - "${MINERU_API_BIND:-0.0.0.0}:${MINERU_API_HOST_PORT:-18000}:8000"
+      - "${PADDLE_TABLE_API_BIND:-0.0.0.0}:${PADDLE_TABLE_API_HOST_PORT:-18200}:8200"
+    volumes:
+      - .:/opt/mineru_workspace
+      - ./data/input:/workspace/input
+      - ./output:/workspace/output
+      - ./.cache/mineru-operator:/workspace/.cache
+      - ./.cache/paddlex:/root/.paddlex
+      - ./logs:/workspace/logs
+      - ./run:/workspace/run

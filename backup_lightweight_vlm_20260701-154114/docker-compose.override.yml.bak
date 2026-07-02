@@ -1,0 +1,23 @@
+services:
+  mineru-operator:
+    environment:
+      MINERU_API_PRELOAD: "true"
+      MINERU_API_ENABLE_VLM_PRELOAD: "true"
+      MINERU_API_STARTUP_TIMEOUT_SECONDS: "1800"
+      MINERU_VLM_GPU_MEMORY_UTILIZATION: "0.45"
+      CUDA_HOME: "/usr/local/cuda"
+      CUDA_PATH: "/usr/local/cuda"
+      CC: "/usr/bin/gcc"
+      CXX: "/usr/bin/g++"
+      XDG_CACHE_HOME: "/workspace/.cache"
+      HF_HOME: "/workspace/.cache/huggingface"
+      MODELSCOPE_CACHE: "/workspace/.cache/modelscope"
+      TORCH_HOME: "/workspace/.cache/torch"
+      PIP_CACHE_DIR: "/workspace/.cache/pip"
+    volumes:
+      - ./.cache/modelscope:/workspace/.cache/modelscope
+      - ./.cache/huggingface:/workspace/.cache/huggingface
+      - ./.cache/torch:/workspace/.cache/torch
+      - ./.cache/vllm:/workspace/.cache/vllm
+      - ./.cache/pip:/workspace/.cache/pip
+      - ./.cache/flashinfer:/root/.cache/flashinfer
