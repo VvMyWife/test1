@@ -20,6 +20,7 @@ docker run --rm --gpus all nvidia/cuda:11.8.0-runtime-ubuntu22.04 nvidia-smi
 ```bash
 mkdir -p data/input output logs run .cache/mineru-operator
 cp your.pdf data/input/
+cp your.jpg data/input/
 ```
 
 不要在代码里写服务器绝对路径。所有宿主路径都通过 Docker bind mount 映射到容器固定路径：

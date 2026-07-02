@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from html.parser import HTMLParser
 import asyncio
 import csv
+import difflib
+import html as html_lib
 import json
 import os
 from pathlib import Path
@@ -25,7 +25,6 @@ from .pure_mineru import (
     DEFAULT_TIMEOUT_SECONDS,
     dump_pure_mineru_json,
     extract_pdf,
-    resolve_mineru_table_engine,
 )
 
 JsonDict = dict[str, Any]
@@ -53,6 +52,7 @@ class PdfFileExtractResult(BaseModel):
     error_type: str | None = None
     error_code: str | None = None
     error: str | None = None
+    error_meta: dict[str, Any] | None = None
     skipped: bool = False
     elapsed_seconds: float | None = Field(default=None, ge=0)
     processing_seconds: float | None = Field(default=None, ge=0)
@@ -156,7 +156,7 @@ class MinerUPdfFileOperator:
         output_dir: str | Path,
         use_paddle_tables: bool | None = None,
         table_engine: str | None = None,
-        paddle_table_mode: str = "auto",
+        paddle_table_mode: str = "ppstructurev3",
         paddle_device: str | None = None,
         source_file_name: str | None = None,
         overwrite: bool = True,
@@ -180,11 +180,8 @@ class MinerUPdfFileOperator:
             use_paddle_tables=use_paddle_tables,
             table_engine=table_engine,
         )
-        table_resolution = resolve_mineru_table_engine(resolved_table_engine)
-        resolved_backend = table_resolution.mineru_backend or self.backend
-        resolved_extra_args = _merge_mineru_extra_args(
-            list(extra_args) if extra_args is not None else self._default_extra_args(resolved_table_engine),
-            table_resolution.extra_args_suffix,
+        resolved_extra_args = (
+            list(extra_args) if extra_args is not None else self._default_extra_args(resolved_table_engine)
         )
 
         if overwrite:
@@ -195,7 +192,7 @@ class MinerUPdfFileOperator:
 
         started = time.perf_counter()
         input_type = "pdf"
-        converted_pdf_path: str | None = None
+        converted_pdf_path: Path | None = None
         page_screenshots_manifest: str | None = None
         resolved_field_keywords = _normalize_field_keywords(field_keywords)
         field_coordinates_path: str | None = None
@@ -203,7 +200,7 @@ class MinerUPdfFileOperator:
         field_match_count = 0
         try:
             self._validate_input_path(resolved_input)
-            input_for_mineru = resolved_input
+            pdf_for_mineru = resolved_input
             if _is_image_file(resolved_input):
                 input_type = "image"
 
@@ -211,13 +208,10 @@ class MinerUPdfFileOperator:
             options.update(
                 {
                     "table_engine": resolved_table_engine,
-                    "backend": resolved_backend,
+                    "backend": self.backend,
                     "parse_method": self.parse_method,
                     "lang": self.lang,
                     "extra_args": resolved_extra_args,
-                    "source_input_uri": str(resolved_input),
-                    "source_input_type": input_type,
-                    "source_input_mime_type": _resolve_input_mime_type(resolved_input),
                 }
             )
             if resolved_table_engine == "paddle":
@@ -226,12 +220,12 @@ class MinerUPdfFileOperator:
                 options["paddle_device"] = paddle_device
 
             parsed = extract_pdf(
-                input_for_mineru,
+                pdf_for_mineru,
                 output_dir=artifact_dir,
                 api_url=self.api_url,
                 timeout_seconds=self.timeout_seconds,
                 parse_method=self.parse_method,
-                backend=resolved_backend,
+                backend=self.backend,
                 lang=self.lang,
                 extra_args=resolved_extra_args,
                 table_engine=resolved_table_engine,
@@ -243,17 +237,38 @@ class MinerUPdfFileOperator:
             parsed = _flatten_mineru_output_dir(
                 parsed,
                 artifact_dir=artifact_dir,
-                mineru_pdf_path=input_for_mineru,
+                mineru_pdf_path=pdf_for_mineru,
             )
-            _normalize_markdown_artifacts(artifact_dir)
+            if resolved_table_engine == "paddle" and _result_layout_provider(parsed) != "paddle":
+                parsed = _merge_paddle_artifact_text_blocks(parsed)
+            parsed = _apply_ocr_text_postprocessing(parsed)
+            parsed = _sync_page_text_from_structured_content(parsed)
+            if resolved_table_engine == "paddle":
+                parsed = _rewrite_markdown_artifacts_from_parsed(
+                    parsed,
+                    artifact_dir=artifact_dir,
+                    output_stem=output_stem,
+                )
+            _rewrite_readable_artifacts_with_text_postprocessing(artifact_dir=artifact_dir)
             artifacts = list(parsed.artifacts)
+            if converted_pdf_path is not None:
+                artifacts.append(
+                    ArtifactRef(
+                        kind="converted_pdf",
+                        uri=str(converted_pdf_path),
+                        meta={
+                            "source_path": str(resolved_input),
+                            "source_file_name": resolved_source_name,
+                            "source_type": input_type,
+                        },
+                    )
+                )
             if enable_page_screenshots:
-                screenshot_artifact = _render_input_page_screenshots(
-                    input_for_mineru,
+                screenshot_artifact = _render_pdf_page_screenshots(
+                    pdf_for_mineru,
                     output_dir=artifact_dir / "page_screenshots",
                     page_count=parsed.page_count,
                     dpi=page_screenshot_dpi,
-                    input_type=input_type,
                 )
                 artifacts.append(screenshot_artifact)
                 page_screenshots_manifest = screenshot_artifact.uri
@@ -262,7 +277,7 @@ class MinerUPdfFileOperator:
                     parsed,
                     keywords=resolved_field_keywords,
                     source_pdf_path=resolved_input,
-                    annotation_pdf_path=input_for_mineru,
+                    annotation_pdf_path=pdf_for_mineru,
                     output_dir=artifact_dir,
                     output_stem=output_stem,
                     table_engine=resolved_table_engine,
@@ -302,13 +317,13 @@ class MinerUPdfFileOperator:
                 table_engine=resolved_table_engine,
                 paddle_table_mode=paddle_table_mode if resolved_table_engine == "paddle" else None,
                 paddle_table_artifact=_find_artifact_uri(parsed.artifacts, "paddle_table_json"),
-                mineru_backend=resolved_backend,
+                mineru_backend=self.backend,
                 mineru_parse_method=self.parse_method,
                 mineru_lang=self.lang,
                 mineru_extra_args=resolved_extra_args,
                 api_url=self.api_url,
                 input_type=input_type,
-                converted_pdf_path=converted_pdf_path,
+                converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
                 page_screenshots_manifest=page_screenshots_manifest,
                 field_keywords=resolved_field_keywords,
                 field_match_count=field_match_count,
@@ -327,19 +342,20 @@ class MinerUPdfFileOperator:
                 error_type=type(exc).__name__,
                 error_code=getattr(exc, "code", None),
                 error=str(exc),
+                error_meta=getattr(exc, "detail", None),
                 elapsed_seconds=round(processing_seconds, 3),
                 processing_seconds=round(processing_seconds, 3),
                 queue_wait_seconds=round(queue_wait_seconds, 3),
                 wall_elapsed_seconds=round(processing_seconds + queue_wait_seconds, 3),
                 table_engine=resolved_table_engine,
                 paddle_table_mode=paddle_table_mode if resolved_table_engine == "paddle" else None,
-                mineru_backend=resolved_backend,
+                mineru_backend=self.backend,
                 mineru_parse_method=self.parse_method,
                 mineru_lang=self.lang,
                 mineru_extra_args=resolved_extra_args,
                 api_url=self.api_url,
                 input_type=input_type,
-                converted_pdf_path=converted_pdf_path,
+                converted_pdf_path=str(converted_pdf_path) if converted_pdf_path is not None else None,
                 page_screenshots_manifest=page_screenshots_manifest,
                 field_keywords=resolved_field_keywords,
                 field_match_count=field_match_count,
@@ -361,7 +377,7 @@ class MinerUPdfFileOperator:
     def _resolve_mineru_table_enable(self, table_engine: str) -> bool:
         if self.mineru_table_enable is not None:
             return self.mineru_table_enable
-        return table_engine in {"ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"}
+        return table_engine in {"ocr", "paddle"}
 
     def _operator_factory_for(self, table_engine: str) -> Callable[[], LayoutExtractMinerUOperator]:
         if self.operator_factory is not None:
@@ -433,7 +449,7 @@ class MinerUPdfDirBatchOperator:
         enable_page_screenshots: bool = False,
         page_screenshot_dpi: int = DEFAULT_PAGE_SCREENSHOT_DPI,
         field_keywords: Sequence[str] | str | None = None,
-        paddle_table_mode: str = "auto",
+        paddle_table_mode: str = "ppstructurev3",
         paddle_device: str | None = None,
         engine: str = "auto",
         lock_acquire_timeout_seconds: float = 3600.0,
@@ -456,7 +472,6 @@ class MinerUPdfDirBatchOperator:
             use_paddle_tables=use_paddle_tables,
             table_engine=table_engine,
         )
-        resolved_backend = resolve_mineru_table_engine(resolved_table_engine).mineru_backend
         selected_engine = _resolve_batch_engine(engine=engine, concurrency=concurrency)
         resolved_field_keywords = _normalize_field_keywords(field_keywords)
         tasks = [
@@ -710,7 +725,6 @@ class MinerUPdfDirBatchOperator:
         total_elapsed_seconds = round(time.perf_counter() - started_at, 3)
         page_count = sum(item.page_count for item in items if item.success)
         seconds_per_page = round(total_elapsed_seconds / page_count, 3) if page_count > 0 else 0.0
-        table_resolution = resolve_mineru_table_engine(table_engine)
         report = PdfDirExtractReport(
             engine=engine,
             input=str(input_root),
@@ -719,13 +733,10 @@ class MinerUPdfDirBatchOperator:
             api_url=self.file_operator.api_url,
             concurrency=concurrency,
             timeout_seconds=self.file_operator.timeout_seconds,
-            mineru_backend=table_resolution.mineru_backend,
+            mineru_backend=self.file_operator.backend,
             mineru_parse_method=self.file_operator.parse_method,
             mineru_lang=self.file_operator.lang,
-            mineru_extra_args=_merge_mineru_extra_args(
-                self.file_operator._default_extra_args(table_engine),
-                table_resolution.extra_args_suffix,
-            ),
+            mineru_extra_args=self.file_operator._default_extra_args(table_engine),
             table_engine=table_engine,
             paddle_table_mode=paddle_table_mode if table_engine == "paddle" else None,
             paddle_device=paddle_device,
@@ -950,30 +961,9 @@ def _resolve_table_engine(*, use_paddle_tables: bool | None, table_engine: str |
         resolved = "paddle" if use_paddle_tables else "ocr"
     else:
         resolved = table_engine.strip().lower()
-    supported = {"ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"}
-    if resolved not in supported:
-        supported_text = "', '".join(sorted(supported))
-        raise ValueError(f"table_engine must be one of '{supported_text}'")
+    if resolved not in {"ocr", "paddle"}:
+        raise ValueError("table_engine must be 'ocr' or 'paddle'")
     return resolved
-
-
-def _merge_mineru_extra_args(base_args: Sequence[str], suffix_args: Sequence[str]) -> list[str]:
-    merged = [str(arg) for arg in base_args]
-    if not suffix_args:
-        return merged
-    existing_flags = {item.strip().lower() for item in merged[::2] if isinstance(item, str)}
-    index = 0
-    while index < len(suffix_args):
-        flag = str(suffix_args[index])
-        if flag.strip().lower() in existing_flags:
-            index += 2
-            continue
-        merged.append(flag)
-        if index + 1 < len(suffix_args):
-            merged.append(str(suffix_args[index + 1]))
-        existing_flags.add(flag.strip().lower())
-        index += 2
-    return merged
 
 
 def _resolve_batch_engine(*, engine: str, concurrency: int) -> str:
@@ -1026,7 +1016,6 @@ def _result_from_existing_json(
     field_annotation_pdf_path = _artifact_uri(artifacts, "field_annotation_pdf")
     resolved_field_keywords = _normalize_field_keywords(field_keywords)
     field_summary = _read_field_coordinate_summary(field_coordinates_path)
-    table_resolution = resolve_mineru_table_engine(table_engine)
     if resolved_field_keywords:
         existing_keywords = _normalize_field_keywords(field_summary.get("field_keywords"))
         if (
@@ -1054,13 +1043,10 @@ def _result_from_existing_json(
         table_cell_count=sum(len(table.get("cells") or []) for table in table_blocks),
         table_engine=table_engine,
         paddle_table_mode=paddle_table_mode if table_engine == "paddle" else None,
-        mineru_backend=table_resolution.mineru_backend,
+        mineru_backend=file_operator.backend,
         mineru_parse_method=file_operator.parse_method,
         mineru_lang=file_operator.lang,
-        mineru_extra_args=_merge_mineru_extra_args(
-            file_operator._default_extra_args(table_engine),
-            table_resolution.extra_args_suffix,
-        ),
+        mineru_extra_args=file_operator._default_extra_args(table_engine),
         api_url=file_operator.api_url,
         input_type="image" if _is_image_file(pdf_path) else "pdf",
         converted_pdf_path=converted_pdf_path,
@@ -1162,30 +1148,7 @@ def _is_image_file(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
 
 
-def _resolve_input_mime_type(file_path: Path) -> str:
-    """Map file suffix to standard MIME type."""
-    suffix = file_path.suffix.lower()
-    _MIME_MAP: dict[str, str] = {
-        ".pdf": "application/pdf",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".bmp": "image/bmp",
-        ".tif": "image/tiff",
-        ".tiff": "image/tiff",
-    }
-    return _MIME_MAP.get(suffix, "application/octet-stream")
-
-
 def _convert_image_to_pdf(image_path: Path, output_pdf_path: Path) -> None:
-    """Convert a single image to PDF via Pillow.
-
-    .. deprecated::
-        Images are now passed directly to MinerU without intermediate PDF
-        conversion.  This function is kept as an explicit opt-in fallback for
-        callers that genuinely need a PDF wrapper (e.g. third-party tools
-        that only accept PDF).
-    """
     try:
         from PIL import Image, ImageOps
     except ModuleNotFoundError as exc:
@@ -1204,6 +1167,1152 @@ def _convert_image_to_pdf(image_path: Path, output_pdf_path: Path) -> None:
         elif converted.mode != "RGB":
             converted = converted.convert("RGB")
         converted.save(output_pdf_path, "PDF", resolution=300.0)
+
+
+def _merge_paddle_artifact_text_blocks(result: Any) -> Any:
+    """Promote Paddle full-page text/table blocks into the final structured result.
+
+    Paddle PPStructureV3 often recognizes useful non-table text in
+    ``parsing_res_list`` even when the MinerU/Paddle table-cell merge has no
+    corresponding table cell. Treat those Paddle blocks as additional text
+    candidates so JSON, Markdown, and field-coordinate lookup all see them.
+    """
+
+    artifact_uri = _find_artifact_uri(list(getattr(result, "artifacts", []) or []), "paddle_table_json")
+    if not artifact_uri:
+        return result
+    artifact_path = Path(str(artifact_uri))
+    if not artifact_path.exists():
+        return result
+    try:
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return result
+
+    candidates = _extract_paddle_artifact_text_candidates(payload, result)
+    if not candidates or not hasattr(result, "model_dump"):
+        return result
+    seal_regions_by_page = _extract_paddle_artifact_layout_regions(
+        payload,
+        result,
+        labels={"seal", "stamp"},
+    )
+
+    data = result.model_dump(mode="python")
+    pages = data.get("pages")
+    if not isinstance(pages, list):
+        return result
+
+    candidates_by_page: dict[int, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        page_index = _to_int(candidate.get("page_index"))
+        if page_index is None:
+            continue
+        candidates_by_page.setdefault(page_index, []).append(candidate)
+
+    changed = False
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_index = _to_int(page.get("page_index")) or 0
+        page_candidates = candidates_by_page.get(page_index, [])
+        if not page_candidates:
+            continue
+
+        text_blocks = [
+            block
+            for block in (page.get("text_blocks") or [])
+            if isinstance(block, dict)
+        ]
+        page_changed = False
+        if _annotate_paddle_seal_blocks(
+            text_blocks,
+            seal_regions=seal_regions_by_page.get(page_index, []),
+            paddle_candidates=page_candidates,
+        ):
+            changed = True
+            page_changed = True
+        existing_texts = [
+            str(block.get("text") or "")
+            for block in text_blocks
+            if str(block.get("text") or "").strip()
+        ]
+        if str(page.get("text") or "").strip():
+            existing_texts.append(str(page.get("text") or ""))
+
+        for candidate in page_candidates:
+            text = str(candidate.get("text") or "").strip()
+            if not text:
+                continue
+            merge_action = _merge_paddle_candidate_by_layout(candidate, text_blocks)
+            if merge_action == "updated":
+                existing_texts.append(text)
+                changed = True
+                page_changed = True
+                continue
+            if merge_action == "skip":
+                continue
+            if _is_redundant_text(text, existing_texts):
+                continue
+            if _is_paddle_overall_ocr_candidate(candidate):
+                continue
+            text_blocks.append(
+                {
+                    "text": text,
+                    "bounding_box": candidate["bounding_box"],
+                    "block_type": candidate.get("block_type") or "paddle_text",
+                    "confidence": candidate.get("confidence"),
+                    "meta": candidate.get("meta") or {},
+                }
+            )
+            existing_texts.append(text)
+            changed = True
+            page_changed = True
+
+        if page_changed:
+            text_blocks = _sort_text_block_dicts(text_blocks)
+            page["text_blocks"] = text_blocks
+            page["text"] = _compose_page_text_from_block_dicts(text_blocks)
+
+    if not changed:
+        return result
+
+    parsed_pdf = data.get("parsed_pdf")
+    if isinstance(parsed_pdf, dict) and isinstance(parsed_pdf.get("pages"), list):
+        page_block_map = {
+            int(page.get("page_index") or 0): list(page.get("text_blocks") or [])
+            for page in pages
+            if isinstance(page, dict)
+        }
+        for parsed_page in parsed_pdf["pages"]:
+            if not isinstance(parsed_page, dict):
+                continue
+            page_index = _to_int(parsed_page.get("page_index")) or 0
+            if page_index in page_block_map:
+                parsed_page["text_blocks"] = page_block_map[page_index]
+
+    return result.__class__.model_validate(data)
+
+
+def _extract_paddle_artifact_text_candidates(payload: Mapping[str, Any], result: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    target_page_sizes = _result_page_sizes(result)
+
+    pages = payload.get("pages")
+    if isinstance(pages, list):
+        for fallback_page_index, raw_page in enumerate(pages):
+            page_payload = _unwrap_paddle_page_payload(raw_page)
+            if not isinstance(page_payload, Mapping):
+                continue
+            page_index = _to_int(page_payload.get("page_index"))
+            if page_index is None:
+                page_index = fallback_page_index
+            scale_x, scale_y = _paddle_page_scale(page_payload, target_page_sizes.get(page_index))
+            for block_index, block in enumerate(_as_mapping_list(page_payload.get("parsing_res_list"))):
+                text = _paddle_block_text(block)
+                bbox = _coerce_paddle_bbox(
+                    block.get("block_bbox") or block.get("bbox"),
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                )
+                if not text or bbox is None:
+                    continue
+                label = str(block.get("block_label") or "text").strip() or "text"
+                candidates.append(
+                    {
+                        "page_index": page_index,
+                        "text": text,
+                        "bounding_box": bbox,
+                        "block_type": f"paddle_{label}",
+                        "confidence": _to_float(block.get("score") or block.get("confidence")),
+                        "meta": {
+                            "source": "paddleocr_ppstructurev3",
+                            "paddle_artifact_source": "parsing_res_list",
+                            "block_label": label,
+                            "block_id": block.get("block_id"),
+                            "block_order": block.get("block_order"),
+                            "paddle_index": block_index,
+                            "coord_space": "mineru_layout",
+                        },
+                    }
+                )
+            candidates.extend(
+                _extract_paddle_overall_ocr_candidates(
+                    page_payload,
+                    page_index=page_index,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                )
+            )
+
+    for raw_index, item in enumerate(_as_mapping_list(payload.get("raw_results"))):
+        candidate = item.get("candidate")
+        raw_result = item.get("result")
+        if not isinstance(candidate, Mapping) or not isinstance(raw_result, Mapping):
+            continue
+        page_index = _to_int(candidate.get("page_index"))
+        if page_index is None:
+            continue
+        text = _paddle_block_text(_unwrap_paddle_page_payload(raw_result))
+        bbox = _coerce_paddle_bbox(candidate.get("bbox"), scale_x=1.0, scale_y=1.0)
+        if not text or bbox is None:
+            continue
+        candidates.append(
+            {
+                "page_index": page_index,
+                "text": text,
+                "bounding_box": bbox,
+                "block_type": "paddle_table",
+                "confidence": _to_float(raw_result.get("structure_score")),
+                "meta": {
+                    "source": "paddleocr_table_structure",
+                    "paddle_artifact_source": "raw_results",
+                    "paddle_index": raw_index,
+                    "image_uri": candidate.get("image_uri"),
+                    "coord_space": "mineru_layout",
+                },
+            }
+        )
+
+    return candidates
+
+
+def _extract_paddle_overall_ocr_candidates(
+    page_payload: Mapping[str, Any],
+    *,
+    page_index: int,
+    scale_x: float,
+    scale_y: float,
+) -> list[dict[str, Any]]:
+    overall = page_payload.get("overall_ocr_res")
+    if not isinstance(overall, Mapping):
+        return []
+    texts = overall.get("rec_texts")
+    if not isinstance(texts, Sequence) or isinstance(texts, (str, bytes)):
+        return []
+    scores = overall.get("rec_scores")
+    boxes = overall.get("rec_boxes")
+    if not isinstance(boxes, Sequence) or isinstance(boxes, (str, bytes)):
+        boxes = overall.get("dt_polys") or overall.get("rec_polys")
+    if not isinstance(boxes, Sequence) or isinstance(boxes, (str, bytes)):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    page_height = _to_float(page_payload.get("height") or page_payload.get("source_height"))
+    for index, raw_text in enumerate(texts):
+        text = _normalize_ocr_output_text(str(raw_text or "")).strip()
+        if not text:
+            continue
+        raw_box = boxes[index] if index < len(boxes) else None
+        bbox = _coerce_paddle_bbox(raw_box, scale_x=scale_x, scale_y=scale_y)
+        if bbox is None:
+            continue
+        score = None
+        if isinstance(scores, Sequence) and not isinstance(scores, (str, bytes)) and index < len(scores):
+            score = _to_float(scores[index])
+        block_type = "page_number" if _looks_like_page_number_candidate(text, bbox, page_height) else "paddle_ocr_text"
+        candidates.append(
+            {
+                "page_index": page_index,
+                "text": text,
+                "bounding_box": bbox,
+                "block_type": block_type,
+                "confidence": score,
+                "meta": {
+                    "source": "paddleocr_ppstructurev3",
+                    "paddle_artifact_source": "overall_ocr_res",
+                    "paddle_index": index,
+                    "coord_space": "mineru_layout",
+                },
+            }
+        )
+    return candidates
+
+
+def _extract_paddle_artifact_layout_regions(
+    payload: Mapping[str, Any],
+    result: Any,
+    *,
+    labels: set[str],
+) -> dict[int, list[dict[str, Any]]]:
+    regions_by_page: dict[int, list[dict[str, Any]]] = {}
+    target_page_sizes = _result_page_sizes(result)
+    pages = payload.get("pages")
+    if not isinstance(pages, list):
+        return regions_by_page
+    normalized_labels = {label.strip().lower() for label in labels}
+    for fallback_page_index, raw_page in enumerate(pages):
+        page_payload = _unwrap_paddle_page_payload(raw_page)
+        if not isinstance(page_payload, Mapping):
+            continue
+        page_index = _to_int(page_payload.get("page_index"))
+        if page_index is None:
+            page_index = fallback_page_index
+        scale_x, scale_y = _paddle_page_scale(page_payload, target_page_sizes.get(page_index))
+        for block_index, block in enumerate(_as_mapping_list(page_payload.get("parsing_res_list"))):
+            label = str(block.get("block_label") or "").strip().lower()
+            if label not in normalized_labels:
+                continue
+            bbox = _coerce_paddle_bbox(
+                block.get("block_bbox") or block.get("bbox"),
+                scale_x=scale_x,
+                scale_y=scale_y,
+            )
+            if bbox is None:
+                continue
+            text = _paddle_block_text(block)
+            regions_by_page.setdefault(page_index, []).append(
+                {
+                    "label": label,
+                    "bounding_box": bbox,
+                    "text": text,
+                    "paddle_index": block_index,
+                    "block_id": block.get("block_id"),
+                    "block_order": block.get("block_order"),
+                }
+            )
+    return regions_by_page
+
+
+def _unwrap_paddle_page_payload(value: Any) -> Mapping[str, Any] | Any:
+    if isinstance(value, Mapping):
+        res = value.get("res")
+        if isinstance(res, Mapping):
+            return res
+        output = value.get("output")
+        if isinstance(output, Mapping):
+            return output
+    return value
+
+
+def _paddle_block_text(block: Any) -> str:
+    if not isinstance(block, Mapping):
+        return ""
+    raw_text = (
+        block.get("block_content")
+        or block.get("pred_html")
+        or block.get("html")
+        or block.get("text")
+        or block.get("rec_text")
+    )
+    if not isinstance(raw_text, str):
+        return ""
+    text = raw_text.strip()
+    if not text:
+        return ""
+    if _looks_like_html_table(text):
+        return ""
+    if "<" in text and ">" in text:
+        text = _html_to_plain_text(text)
+    return _normalize_ocr_output_text(text).strip()
+
+
+def _looks_like_html_table(value: str) -> bool:
+    return bool(re.search(r"(?is)<\s*table\b", value))
+
+
+def _html_to_plain_text(value: str) -> str:
+    text = value
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"(?i)</\s*tr\s*>", "\n", text)
+    text = re.sub(r"(?i)</\s*t[dh]\s*>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _result_page_sizes(result: Any) -> dict[int, tuple[float | None, float | None]]:
+    sizes: dict[int, tuple[float | None, float | None]] = {}
+    parsed_pdf = getattr(result, "parsed_pdf", None)
+    pages = getattr(parsed_pdf, "pages", []) if parsed_pdf is not None else []
+    for page in pages or []:
+        page_index = _to_int(getattr(page, "page_index", None))
+        if page_index is None:
+            continue
+        image_size = getattr(page, "image_size", None)
+        width = _to_float(getattr(image_size, "width", None)) if image_size is not None else None
+        height = _to_float(getattr(image_size, "height", None)) if image_size is not None else None
+        max_x, max_y = _page_coordinate_extents(page)
+        if width and height and (max_x > width * 1.05 or max_y > height * 1.05):
+            width = None
+            height = None
+        sizes[page_index] = (width, height)
+    return sizes
+
+
+def _page_coordinate_extents(page: Any) -> tuple[float, float]:
+    max_x = 0.0
+    max_y = 0.0
+    for block in getattr(page, "text_blocks", []) or []:
+        box = getattr(block, "bounding_box", None)
+        if box is None:
+            continue
+        max_x = max(max_x, float(getattr(box, "x", 0)) + float(getattr(box, "w", 0)))
+        max_y = max(max_y, float(getattr(box, "y", 0)) + float(getattr(box, "h", 0)))
+    for table in getattr(page, "table_blocks", []) or []:
+        table_box = getattr(table, "bounding_box", None)
+        if table_box is not None:
+            max_x = max(max_x, float(getattr(table_box, "x", 0)) + float(getattr(table_box, "w", 0)))
+            max_y = max(max_y, float(getattr(table_box, "y", 0)) + float(getattr(table_box, "h", 0)))
+        for cell in getattr(table, "cells", []) or []:
+            box = getattr(cell, "bounding_box", None)
+            if box is None:
+                continue
+            max_x = max(max_x, float(getattr(box, "x", 0)) + float(getattr(box, "w", 0)))
+            max_y = max(max_y, float(getattr(box, "y", 0)) + float(getattr(box, "h", 0)))
+    return max_x, max_y
+
+
+def _paddle_page_scale(
+    payload: Mapping[str, Any],
+    target_size: tuple[float | None, float | None] | None,
+) -> tuple[float, float]:
+    source_width = _to_float(payload.get("width") or payload.get("source_width"))
+    source_height = _to_float(payload.get("height") or payload.get("source_height"))
+    target_width, target_height = target_size or (None, None)
+    if source_width and source_height and target_width and target_height:
+        return float(target_width) / float(source_width), float(target_height) / float(source_height)
+    return 1.0, 1.0
+
+
+def _coerce_paddle_bbox(value: Any, *, scale_x: float, scale_y: float) -> dict[str, int] | None:
+    if isinstance(value, Mapping):
+        if {"x", "y", "w", "h"}.issubset(value):
+            x = _to_float(value.get("x"))
+            y = _to_float(value.get("y"))
+            w = _to_float(value.get("w"))
+            h = _to_float(value.get("h"))
+            if x is None or y is None or w is None or h is None:
+                return None
+            return {
+                "x": int(round(x * scale_x)),
+                "y": int(round(y * scale_y)),
+                "w": max(0, int(round(w * scale_x))),
+                "h": max(0, int(round(h * scale_y))),
+            }
+        value = list(value.values())
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) < 4:
+        return None
+    numbers = [_to_float(item) for item in list(value)[:4]]
+    if any(item is None for item in numbers):
+        return None
+    x0, y0, x1, y1 = [float(item) for item in numbers if item is not None]
+    if x1 < x0 or y1 < y0:
+        xs = [x0, x1]
+        ys = [y0, y1]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+    return {
+        "x": int(round(x0 * scale_x)),
+        "y": int(round(y0 * scale_y)),
+        "w": max(0, int(round((x1 - x0) * scale_x))),
+        "h": max(0, int(round((y1 - y0) * scale_y))),
+    }
+
+
+def _looks_like_page_number_candidate(
+    text: str,
+    bbox: Mapping[str, Any],
+    page_height: float | None,
+) -> bool:
+    if not re.fullmatch(r"\d{1,4}", text.strip()):
+        return False
+    if page_height is None or page_height <= 0:
+        return False
+    y = _bbox_dict_value(bbox, "y")
+    h = _bbox_dict_value(bbox, "h")
+    center_y = y + h / 2.0
+    return center_y <= page_height * 0.12 or center_y >= page_height * 0.88
+
+
+def _apply_ocr_text_postprocessing(result: Any) -> Any:
+    if not hasattr(result, "model_dump"):
+        return result
+    data = result.model_dump(mode="python")
+    rewritten = _rewrite_ocr_text_values(data)
+    return result.__class__.model_validate(rewritten)
+
+
+def _rewrite_ocr_text_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _rewrite_ocr_text_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_ocr_text_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_rewrite_ocr_text_values(item) for item in value)
+    if isinstance(value, str):
+        return _normalize_ocr_output_text(value)
+    return value
+
+
+def _sync_page_text_from_structured_content(result: Any) -> Any:
+    if not hasattr(result, "model_dump"):
+        return result
+    data = result.model_dump(mode="python")
+    pages = data.get("pages")
+    if not isinstance(pages, list):
+        return result
+    changed = False
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        text = _compose_page_text_from_page_dict(page)
+        if text != page.get("text"):
+            page["text"] = text
+            changed = True
+    parsed_pdf = data.get("parsed_pdf")
+    parsed_pages = parsed_pdf.get("pages") if isinstance(parsed_pdf, dict) else None
+    if isinstance(parsed_pages, list):
+        pages_by_index = {
+            _to_int(page.get("page_index")) or 0: page
+            for page in pages
+            if isinstance(page, dict)
+        }
+        for parsed_page in parsed_pages:
+            if not isinstance(parsed_page, dict):
+                continue
+            page_index = _to_int(parsed_page.get("page_index")) or 0
+            source_page = pages_by_index.get(page_index)
+            if source_page is None:
+                continue
+            for key in ("text_blocks", "table_blocks"):
+                if key in source_page and parsed_page.get(key) != source_page.get(key):
+                    parsed_page[key] = source_page.get(key)
+                    changed = True
+    if not changed:
+        return result
+    return result.__class__.model_validate(data)
+
+
+def _compose_page_text_from_page_dict(page: Mapping[str, Any]) -> str | None:
+    items: list[tuple[float, float, str]] = []
+    for block in page.get("text_blocks") or []:
+        if not isinstance(block, Mapping):
+            continue
+        if not _should_render_text_block_dict(block):
+            continue
+        text = _canonical_ocr_text(block.get("text"))
+        if not text:
+            continue
+        box = block.get("bounding_box")
+        items.append((_bbox_dict_value(box, "y"), _bbox_dict_value(box, "x"), text))
+    for table in page.get("table_blocks") or []:
+        if not isinstance(table, Mapping):
+            continue
+        text = _table_block_to_plain_text(table)
+        if not text:
+            continue
+        box = table.get("bounding_box") or _table_cells_union_bbox(table)
+        items.append((_bbox_dict_value(box, "y"), _bbox_dict_value(box, "x"), text))
+    return _compose_unique_text_items(items)
+
+
+def _compose_unique_text_items(items: Sequence[tuple[float, float, str]]) -> str | None:
+    lines: list[str] = []
+    seen_texts: list[str] = []
+    for _, _, text in _sort_text_items_by_reading_order(items):
+        if _is_redundant_text(text, seen_texts):
+            continue
+        seen_texts.append(text)
+        lines.append(text)
+    return "\n".join(lines) or None
+
+
+def _sort_text_items_by_reading_order(
+    items: Sequence[tuple[float, float, str]],
+) -> list[tuple[float, float, str]]:
+    if not items:
+        return []
+    sorted_items = sorted(items, key=lambda item: (item[0], item[1], item[2]))
+    line_tolerance = 12.0
+    lines: list[list[tuple[float, float, str]]] = []
+    line_anchors: list[float] = []
+    for item in sorted_items:
+        y = float(item[0])
+        if not lines or abs(y - line_anchors[-1]) > line_tolerance:
+            lines.append([item])
+            line_anchors.append(y)
+            continue
+        lines[-1].append(item)
+        line_anchors[-1] = sum(float(existing[0]) for existing in lines[-1]) / len(lines[-1])
+
+    flattened: list[tuple[float, float, str]] = []
+    for line in lines:
+        flattened.extend(sorted(line, key=lambda item: (item[1], item[0], item[2])))
+    return flattened
+
+
+def _canonical_ocr_text(value: Any) -> str:
+    return _normalize_ocr_output_text(str(value or "")).strip()
+
+
+def _canonical_match_text(value: Any) -> str:
+    return _normalize_match_text(_canonical_ocr_text(value))
+
+
+def _is_redundant_text(text: str, existing_texts: Sequence[str]) -> bool:
+    candidate = _canonical_match_text(text)
+    if not candidate:
+        return True
+    existing_norms = [_canonical_match_text(item) for item in existing_texts if str(item or "").strip()]
+    for existing in existing_norms:
+        if not existing:
+            continue
+        if candidate == existing:
+            return True
+        if len(candidate) >= 12 and candidate in existing:
+            return True
+        if len(existing) >= 12 and existing in candidate:
+            return True
+
+    candidate_units = _text_similarity_units(text)
+    if not candidate_units:
+        return False
+    existing_units: set[str] = set()
+    for item in existing_texts:
+        existing_units.update(_text_similarity_units(item))
+    if not existing_units:
+        return False
+    coverage = len(candidate_units & existing_units) / max(1, len(candidate_units))
+    return coverage >= 0.82
+
+
+def _annotate_paddle_seal_blocks(
+    text_blocks: Sequence[dict[str, Any]],
+    *,
+    seal_regions: Sequence[Mapping[str, Any]],
+    paddle_candidates: Sequence[Mapping[str, Any]],
+) -> bool:
+    if not seal_regions:
+        return False
+    changed = False
+    paddle_text_regions = [
+        candidate
+        for candidate in paddle_candidates
+        if _canonical_ocr_text(candidate.get("text"))
+        and isinstance(candidate.get("bounding_box"), Mapping)
+    ]
+    for block in text_blocks:
+        block_type = str(block.get("block_type") or "").strip().lower()
+        if block_type not in {"seal", "stamp"}:
+            continue
+        if not _canonical_ocr_text(block.get("text")):
+            continue
+        block_box = block.get("bounding_box")
+        if not isinstance(block_box, Mapping):
+            continue
+        matched_region = _matching_seal_region(block_box, seal_regions)
+        if matched_region is None:
+            continue
+        text_confirmed = _has_confirming_paddle_text(block, paddle_text_regions)
+        meta = dict(block.get("meta") or {})
+        updated_meta = dict(meta)
+        updated_meta["paddle_layout_label"] = matched_region.get("label") or "seal"
+        updated_meta["paddle_layout_source"] = "paddleocr_ppstructurev3"
+        updated_meta["paddle_text_confirmed"] = text_confirmed
+        updated_meta["paddle_layout_region"] = {
+            "bounding_box": matched_region.get("bounding_box"),
+            "paddle_index": matched_region.get("paddle_index"),
+            "block_id": matched_region.get("block_id"),
+            "block_order": matched_region.get("block_order"),
+        }
+        if updated_meta == meta:
+            continue
+        block["meta"] = updated_meta
+        changed = True
+    return changed
+
+
+def _matching_seal_region(
+    block_box: Mapping[str, Any],
+    seal_regions: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    for region in seal_regions:
+        region_box = region.get("bounding_box")
+        if not isinstance(region_box, Mapping):
+            continue
+        if _bbox_overlap_score(block_box, region_box) >= 0.05:
+            return region
+        if _bbox_center_distance_score(block_box, region_box) <= 1.4:
+            return region
+    return None
+
+
+def _has_confirming_paddle_text(
+    block: Mapping[str, Any],
+    paddle_text_regions: Sequence[Mapping[str, Any]],
+) -> bool:
+    block_text = _canonical_ocr_text(block.get("text"))
+    block_box = block.get("bounding_box")
+    if not block_text or not isinstance(block_box, Mapping):
+        return False
+    for candidate in paddle_text_regions:
+        candidate_text = _canonical_ocr_text(candidate.get("text"))
+        candidate_box = candidate.get("bounding_box")
+        if not candidate_text or not isinstance(candidate_box, Mapping):
+            continue
+        if _bbox_overlap_score(block_box, candidate_box) < 0.05:
+            continue
+        if _are_texts_near_duplicates(block_text, candidate_text):
+            return True
+    return False
+
+
+def _merge_paddle_candidate_by_layout(
+    candidate: Mapping[str, Any],
+    existing_blocks: Sequence[Mapping[str, Any]],
+) -> str | None:
+    candidate_text = _canonical_ocr_text(candidate.get("text"))
+    candidate_box = candidate.get("bounding_box")
+    if not candidate_text or not isinstance(candidate_box, Mapping):
+        return None
+
+    overlapping_texts: list[str] = []
+    near_duplicate_blocks: list[Mapping[str, Any]] = []
+    for block in existing_blocks:
+        if not isinstance(block, Mapping):
+            continue
+        existing_text = _canonical_ocr_text(block.get("text"))
+        existing_box = block.get("bounding_box")
+        if not existing_text or not isinstance(existing_box, Mapping):
+            continue
+        if _bbox_overlap_score(candidate_box, existing_box) < 0.25:
+            continue
+        overlapping_texts.append(existing_text)
+        if _are_texts_near_duplicates(candidate_text, existing_text):
+            near_duplicate_blocks.append(block)
+
+    if len(near_duplicate_blocks) == 1 and _should_replace_text_block_with_paddle(
+        candidate,
+        near_duplicate_blocks[0],
+    ):
+        _replace_text_block_with_paddle_candidate(near_duplicate_blocks[0], candidate)
+        return "updated"
+
+    if near_duplicate_blocks:
+        return "skip"
+
+    if not overlapping_texts:
+        return None
+    return "skip" if _are_texts_near_duplicates(candidate_text, "\n".join(overlapping_texts)) else None
+
+
+def _should_replace_text_block_with_paddle(
+    candidate: Mapping[str, Any],
+    existing_block: Mapping[str, Any],
+) -> bool:
+    block_type = str(existing_block.get("block_type") or "").strip().lower()
+    if block_type in {"table_cell", "page_number"}:
+        return False
+    candidate_text = _canonical_ocr_text(candidate.get("text"))
+    existing_text = _canonical_ocr_text(existing_block.get("text"))
+    if not candidate_text or not existing_text:
+        return False
+    if candidate_text == existing_text:
+        return False
+    candidate_norm = _canonical_match_text(candidate_text)
+    existing_norm = _canonical_match_text(existing_text)
+    if not candidate_norm or not existing_norm:
+        return False
+    length_ratio = len(candidate_norm) / max(1, len(existing_norm))
+    if len(candidate_norm) < len(existing_norm) and candidate_norm in existing_norm:
+        return False
+    if _is_paddle_overall_ocr_candidate(candidate) and length_ratio < 0.9:
+        return False
+    if length_ratio < 0.65 or length_ratio > 1.8:
+        return False
+    candidate_confidence = _to_float(candidate.get("confidence"))
+    existing_confidence = _to_float(existing_block.get("confidence"))
+    if candidate_confidence is not None and existing_confidence is not None:
+        if candidate_confidence + 0.05 < existing_confidence:
+            return False
+    if existing_confidence is None:
+        if candidate_confidence is not None and candidate_confidence < 0.9:
+            return False
+        return len(candidate_norm) >= len(existing_norm) + 2
+    if existing_confidence < 0.85:
+        return True
+    return len(candidate_norm) >= len(existing_norm) + 2
+
+
+def _replace_text_block_with_paddle_candidate(
+    existing_block: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> None:
+    if not isinstance(existing_block, dict):
+        return
+    original_text = str(existing_block.get("text") or "")
+    existing_block["text"] = str(candidate.get("text") or "").strip()
+    candidate_box = candidate.get("bounding_box")
+    if isinstance(candidate_box, Mapping):
+        existing_block["bounding_box"] = dict(candidate_box)
+    candidate_confidence = _to_float(candidate.get("confidence"))
+    if candidate_confidence is not None:
+        existing_block["confidence"] = candidate_confidence
+    meta = dict(existing_block.get("meta") or {})
+    meta["text_fusion_source"] = "paddle_overlapping_text"
+    meta["mineru_original_text"] = original_text
+    meta["paddle_replacement_meta"] = dict(candidate.get("meta") or {})
+    existing_block["meta"] = meta
+
+
+def _is_paddle_overall_ocr_candidate(candidate: Mapping[str, Any]) -> bool:
+    meta = candidate.get("meta")
+    return isinstance(meta, Mapping) and meta.get("paddle_artifact_source") == "overall_ocr_res"
+
+
+def _are_texts_near_duplicates(left: str, right: str) -> bool:
+    left_norm = _canonical_match_text(left)
+    right_norm = _canonical_match_text(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    if len(left_norm) >= 12 and left_norm in right_norm:
+        return True
+    if len(right_norm) >= 12 and right_norm in left_norm:
+        return True
+    return difflib.SequenceMatcher(None, left_norm, right_norm).ratio() >= 0.62
+
+
+def _bbox_overlap_score(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    left_x0 = _bbox_dict_value(left, "x")
+    left_y0 = _bbox_dict_value(left, "y")
+    left_x1 = left_x0 + _bbox_dict_value(left, "w")
+    left_y1 = left_y0 + _bbox_dict_value(left, "h")
+    right_x0 = _bbox_dict_value(right, "x")
+    right_y0 = _bbox_dict_value(right, "y")
+    right_x1 = right_x0 + _bbox_dict_value(right, "w")
+    right_y1 = right_y0 + _bbox_dict_value(right, "h")
+    width = max(0.0, min(left_x1, right_x1) - max(left_x0, right_x0))
+    height = max(0.0, min(left_y1, right_y1) - max(left_y0, right_y0))
+    if width <= 0.0 or height <= 0.0:
+        return 0.0
+    overlap = width * height
+    left_area = max(1.0, (left_x1 - left_x0) * (left_y1 - left_y0))
+    right_area = max(1.0, (right_x1 - right_x0) * (right_y1 - right_y0))
+    return overlap / max(1.0, min(left_area, right_area))
+
+
+def _bbox_center_distance_score(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    left_x = _bbox_dict_value(left, "x") + _bbox_dict_value(left, "w") / 2.0
+    left_y = _bbox_dict_value(left, "y") + _bbox_dict_value(left, "h") / 2.0
+    right_x = _bbox_dict_value(right, "x") + _bbox_dict_value(right, "w") / 2.0
+    right_y = _bbox_dict_value(right, "y") + _bbox_dict_value(right, "h") / 2.0
+    dx = abs(left_x - right_x)
+    dy = abs(left_y - right_y)
+    scale = max(
+        1.0,
+        _bbox_dict_value(left, "w"),
+        _bbox_dict_value(left, "h"),
+        _bbox_dict_value(right, "w"),
+        _bbox_dict_value(right, "h"),
+    )
+    return (dx + dy) / scale
+
+
+def _should_render_text_block_dict(block: Mapping[str, Any]) -> bool:
+    meta = block.get("meta")
+    if isinstance(meta, Mapping) and meta.get("render_text") is False:
+        return False
+    return True
+
+
+def _should_render_text_block_obj(block: Any) -> bool:
+    meta = getattr(block, "meta", None)
+    if isinstance(meta, Mapping) and meta.get("render_text") is False:
+        return False
+    return True
+
+
+def _text_similarity_units(value: Any) -> set[str]:
+    text = _canonical_ocr_text(value)
+    if not text:
+        return set()
+    parts = re.split(r"[\n\r\t,;:!?，。；：！？、（）()【】\[\]<>《》]+", text)
+    units: set[str] = set()
+    for part in parts:
+        normalized = _normalize_match_text(part)
+        if len(normalized) >= 4:
+            units.add(normalized)
+    whole = _normalize_match_text(text)
+    if 4 <= len(whole) <= 40:
+        units.add(whole)
+    return units
+
+
+def _table_block_to_plain_text(table: Any) -> str:
+    cells = _as_table_cell_mappings(table)
+    if not cells:
+        return ""
+    rows: dict[int, list[Mapping[str, Any]]] = {}
+    fallback_row = 0
+    for cell in cells:
+        text = _canonical_ocr_text(cell.get("text"))
+        if not text:
+            continue
+        row_index = _to_int(cell.get("row_index"))
+        if row_index is None:
+            row_index = fallback_row
+            fallback_row += 1
+        rows.setdefault(row_index, []).append(cell)
+
+    rendered_rows: list[str] = []
+    seen_rows: list[str] = []
+    for row_index in sorted(rows):
+        row_cells = sorted(
+            rows[row_index],
+            key=lambda cell: (
+                _to_int(cell.get("col_index")) if _to_int(cell.get("col_index")) is not None else 10_000,
+                _bbox_dict_value(cell.get("bounding_box"), "x"),
+            ),
+        )
+        parts: list[str] = []
+        seen_parts: list[str] = []
+        for cell in row_cells:
+            text = _canonical_ocr_text(cell.get("text"))
+            if not text or _is_redundant_text(text, seen_parts):
+                continue
+            seen_parts.append(text)
+            parts.append(text)
+        row_text = " ".join(parts).strip()
+        if row_text and not _is_redundant_text(row_text, seen_rows):
+            seen_rows.append(row_text)
+            rendered_rows.append(row_text)
+    return "\n".join(rendered_rows)
+
+
+def _as_table_cell_mappings(table: Any) -> list[Mapping[str, Any]]:
+    raw_cells = table.get("cells") if isinstance(table, Mapping) else getattr(table, "cells", None)
+    cells: list[Mapping[str, Any]] = []
+    for cell in raw_cells or []:
+        if isinstance(cell, Mapping):
+            cells.append(cell)
+        elif hasattr(cell, "model_dump"):
+            cells.append(cell.model_dump(mode="python"))
+    return cells
+
+
+def _table_cells_union_bbox(table: Any) -> dict[str, float] | None:
+    boxes = [
+        cell.get("bounding_box")
+        for cell in _as_table_cell_mappings(table)
+        if isinstance(cell.get("bounding_box"), Mapping)
+    ]
+    if not boxes:
+        return None
+    x0 = min(float(box.get("x", 0)) for box in boxes)
+    y0 = min(float(box.get("y", 0)) for box in boxes)
+    x1 = max(float(box.get("x", 0)) + float(box.get("w", 0)) for box in boxes)
+    y1 = max(float(box.get("y", 0)) + float(box.get("h", 0)) for box in boxes)
+    return {"x": x0, "y": y0, "w": max(0.0, x1 - x0), "h": max(0.0, y1 - y0)}
+
+
+def _normalize_ocr_output_text(value: str) -> str:
+    text = value
+    text = text.replace("（盖率）", "（盖章）")
+    text = text.replace("(盖率)", "(盖章)")
+    text = text.replace("签字盖率", "签字盖章")
+    text = re.sub(r"(签字[（(])盖率([）)])", r"\1盖章\2", text)
+    text = re.sub(
+        r"([\u4e00-\u9fffA-Za-z]{1,20})[\[〔](\d{4})[\]〕](\s*\d+\s*号)",
+        r"\1〔\2〕\3",
+        text,
+    )
+    text = re.sub(
+        r"([\u4e00-\u9fffA-Za-z]{1,20}(?:监办|府办|办发|府发|函|字|文))[（(](\d{4})[）)](\s*\d+\s*号)",
+        r"\1〔\2〕\3",
+        text,
+    )
+    return text
+
+
+def _rewrite_markdown_artifacts_from_parsed(
+    result: Any,
+    *,
+    artifact_dir: Path,
+    output_stem: str,
+) -> Any:
+    markdown = _render_markdown_from_parsed_result(result)
+    if not markdown.strip():
+        return result
+
+    markdown_paths = _markdown_artifact_paths(result, artifact_dir=artifact_dir)
+    added_artifact = False
+    if not markdown_paths:
+        markdown_paths = [artifact_dir / f"{output_stem}.md"]
+        added_artifact = True
+    for path in markdown_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(markdown, encoding="utf-8")
+
+    if not added_artifact:
+        return result
+    artifacts = list(getattr(result, "artifacts", []) or [])
+    artifacts.append(
+        ArtifactRef(
+            kind="markdown",
+            uri=str(markdown_paths[0]),
+            meta={"content_type": "text/markdown", "source": "merged_parsed_result"},
+        )
+    )
+    return result.model_copy(update={"artifacts": artifacts})
+
+
+def _rewrite_readable_artifacts_with_text_postprocessing(*, artifact_dir: Path) -> None:
+    for path in sorted([*artifact_dir.glob("*.md"), *artifact_dir.glob("*.json")]):
+        if not _should_postprocess_readable_artifact(path):
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        rewritten = _normalize_ocr_output_text(original)
+        if rewritten != original:
+            path.write_text(rewritten, encoding="utf-8")
+
+
+def _should_postprocess_readable_artifact(path: Path) -> bool:
+    name = path.name
+    if name == "paddle_table_structure.json":
+        return False
+    if name.endswith(".field_coordinates.json") or name.endswith(".error.json"):
+        return False
+    return path.suffix.lower() in {".md", ".json"}
+
+
+def _markdown_artifact_paths(result: Any, *, artifact_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for artifact in getattr(result, "artifacts", []) or []:
+        if getattr(artifact, "kind", None) != "markdown":
+            continue
+        uri = getattr(artifact, "uri", None)
+        if not uri:
+            continue
+        path = Path(str(uri))
+        if path not in seen:
+            paths.append(path)
+            seen.add(path)
+    for path in sorted(artifact_dir.glob("*.md")):
+        if path not in seen:
+            paths.append(path)
+            seen.add(path)
+    return paths
+
+
+def _render_markdown_from_parsed_result(result: Any) -> str:
+    if hasattr(result, "model_dump"):
+        data = result.model_dump(mode="python")
+        pages = data.get("pages") if isinstance(data, dict) else []
+        if isinstance(pages, list):
+            chunks: list[str] = []
+            for page in pages:
+                if not isinstance(page, Mapping):
+                    continue
+                page_index = _to_int(page.get("page_index")) or 0
+                if len(pages) > 1:
+                    chunks.append(f"# Page {page_index + 1}")
+                page_text = _compose_page_text_from_page_dict(page)
+                if page_text:
+                    chunks.append(page_text)
+            return "\n\n".join(chunks).strip() + "\n"
+
+    pages = getattr(result, "pages", []) or []
+    chunks: list[str] = []
+    for page in pages:
+        page_index = _to_int(getattr(page, "page_index", None)) or 0
+        if len(pages) > 1:
+            chunks.append(f"# Page {page_index + 1}")
+        blocks = _sort_text_blocks_for_render(getattr(page, "text_blocks", []) or [])
+        seen: set[str] = set()
+        for block in blocks:
+            if not _should_render_text_block_obj(block):
+                continue
+            text = str(getattr(block, "text", "") or "").strip()
+            if not text:
+                continue
+            if "<" in text and ">" in text:
+                text = _html_to_plain_text(text)
+            text = _normalize_ocr_output_text(text).strip()
+            normalized = _normalize_match_text(text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            chunks.append(text)
+    return "\n\n".join(chunks).strip() + "\n"
+
+
+def _sort_text_blocks_for_render(blocks: Sequence[Any]) -> list[Any]:
+    return sorted(
+        blocks,
+        key=lambda block: (
+            _bbox_attr(getattr(block, "bounding_box", None), "y"),
+            _bbox_attr(getattr(block, "bounding_box", None), "x"),
+            str(getattr(block, "text", "")),
+        ),
+    )
+
+
+def _sort_text_block_dicts(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        blocks,
+        key=lambda block: (
+            _bbox_dict_value(block.get("bounding_box"), "y"),
+            _bbox_dict_value(block.get("bounding_box"), "x"),
+            str(block.get("text") or ""),
+        ),
+    )
+
+
+def _compose_page_text_from_block_dicts(blocks: Sequence[Mapping[str, Any]]) -> str | None:
+    lines: list[str] = []
+    seen_texts: list[str] = []
+    for block in _sort_text_block_dicts([dict(item) for item in blocks]):
+        if not _should_render_text_block_dict(block):
+            continue
+        text = _canonical_ocr_text(block.get("text"))
+        if not text:
+            continue
+        if _is_redundant_text(text, seen_texts):
+            continue
+        seen_texts.append(text)
+        lines.append(text)
+    return "\n".join(lines) or None
+
+
+def _bbox_attr(box: Any, key: str) -> float:
+    value = getattr(box, key, None)
+    parsed = _to_float(value)
+    return parsed if parsed is not None else 0.0
+
+
+def _bbox_dict_value(box: Any, key: str) -> float:
+    if not isinstance(box, Mapping):
+        return 0.0
+    parsed = _to_float(box.get(key))
+    return parsed if parsed is not None else 0.0
+
+
+def _as_mapping_list(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _write_field_coordinate_artifacts(
@@ -1274,6 +2383,25 @@ def _extract_field_coordinate_matches(result: Any, keywords: Sequence[str]) -> l
     pages = getattr(parsed_pdf, "pages", []) if parsed_pdf is not None else []
     for page in pages:
         page_index = int(getattr(page, "page_index", 0))
+        for block in getattr(page, "text_blocks", []) or []:
+            text = str(getattr(block, "text", "") or "")
+            normalized_text = _normalize_match_text(text)
+            if not normalized_text:
+                continue
+            bounding_box = getattr(block, "bounding_box", None)
+            if bounding_box is None:
+                continue
+            for keyword, normalized_keyword in normalized_keywords:
+                if normalized_keyword and normalized_keyword in normalized_text:
+                    matches.append(
+                        _build_text_block_field_match(
+                            keyword=keyword,
+                            text=text,
+                            page=page,
+                            block=block,
+                            bounding_box=bounding_box,
+                        )
+                    )
         for table in getattr(page, "table_blocks", []) or []:
             for cell in getattr(table, "cells", []) or []:
                 text = str(getattr(cell, "text", "") or "")
@@ -1296,6 +2424,7 @@ def _extract_field_coordinate_matches(result: Any, keywords: Sequence[str]) -> l
                             )
                         )
 
+    matches = _dedupe_field_matches(matches)
     matches.sort(
         key=lambda item: (
             int(item["page_index"]),
@@ -1340,6 +2469,122 @@ def _build_field_match(
             "cell_meta": getattr(cell, "meta", {}),
         },
     }
+
+
+def _build_text_block_field_match(
+    *,
+    keyword: str,
+    text: str,
+    page: Any,
+    block: Any,
+    bounding_box: BoundingBox,
+) -> dict[str, Any]:
+    box = _bbox_to_dict(bounding_box)
+    meta = dict(getattr(block, "meta", {}) or {})
+    return {
+        "keyword": keyword,
+        "text": text,
+        "page_index": int(getattr(page, "page_index", 0)),
+        "page_number": int(getattr(page, "page_index", 0)) + 1,
+        "source": "text_block",
+        "table_id": None,
+        "cell_id": None,
+        "row_index": None,
+        "col_index": None,
+        "row_span": None,
+        "col_span": None,
+        "confidence": getattr(block, "confidence", None),
+        "coord_space": meta.get("coord_space") or getattr(page, "coord_space", "mineru_layout"),
+        "bounding_box": box,
+        "quad_points": _bbox_quad_points(box),
+        "pdf_bounding_box": None,
+        "pdf_quad_points": None,
+        "meta": {
+            "block_type": getattr(block, "block_type", None),
+            "block_meta": meta,
+        },
+    }
+
+
+def _dedupe_field_matches(matches: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    exact_deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for match in matches:
+        box = match.get("bounding_box") if isinstance(match.get("bounding_box"), dict) else {}
+        key = (
+            match.get("keyword"),
+            match.get("page_index"),
+            round(float(box.get("x", 0)), 1),
+            round(float(box.get("y", 0)), 1),
+            round(float(box.get("w", 0)), 1),
+            round(float(box.get("h", 0)), 1),
+            _normalize_match_text(str(match.get("text") or "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        exact_deduped.append(match)
+
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for match in exact_deduped:
+        text_key = _normalize_match_text(str(match.get("text") or ""))
+        if not text_key:
+            deduped_key = (id(match),)
+        else:
+            deduped_key = (
+                match.get("keyword"),
+                match.get("page_index"),
+                text_key,
+            )
+        groups.setdefault(deduped_key, []).append(match)
+
+    deduped: list[dict[str, Any]] = []
+    for group in groups.values():
+        if len(group) <= 1:
+            deduped.extend(group)
+            continue
+        source_classes = {_field_match_source_class(match) for match in group}
+        if len(source_classes) <= 1:
+            deduped.extend(group)
+            continue
+        best_rank = min(_field_match_source_rank(match) for match in group)
+        deduped.extend(match for match in group if _field_match_source_rank(match) == best_rank)
+    return deduped
+
+
+def _field_match_source_class(match: Mapping[str, Any]) -> str:
+    source = str(match.get("source") or "")
+    meta = match.get("meta") if isinstance(match.get("meta"), Mapping) else {}
+    block_meta = meta.get("block_meta") if isinstance(meta.get("block_meta"), Mapping) else {}
+    cell_meta = meta.get("cell_meta") if isinstance(meta.get("cell_meta"), Mapping) else {}
+    table_provider = str(meta.get("table_provider") or "")
+    raw_values = [
+        source,
+        table_provider,
+        str(block_meta.get("source") or ""),
+        str(block_meta.get("paddle_artifact_source") or ""),
+        str(cell_meta.get("source") or ""),
+        str(cell_meta.get("merge_source") or ""),
+    ]
+    raw = " ".join(raw_values).lower()
+    if source == "table_cell":
+        return "table_cell"
+    if "paddle" in raw or "ppstructure" in raw:
+        return "paddle_text"
+    if raw.strip():
+        return "mineru_text"
+    return "unknown"
+
+
+def _field_match_source_rank(match: Mapping[str, Any]) -> int:
+    source_class = _field_match_source_class(match)
+    if source_class == "table_cell":
+        return 0
+    if source_class == "paddle_text":
+        return 1
+    if source_class == "mineru_text":
+        return 2
+    return 3
 
 
 def _write_field_annotation_pdf(
@@ -1476,7 +2721,12 @@ def _normalize_field_keywords(value: Sequence[str] | str | None) -> list[str]:
 
 
 def _normalize_match_text(value: str) -> str:
-    return re.sub(r"\s+", "", value).casefold()
+    normalized = _normalize_ocr_output_text(value)
+    return re.sub(
+        r"[\s,.;:!?，。；：！？、（）()\[\]【】<>《》“”\"'‘’\-—_＿/\\]+",
+        "",
+        normalized,
+    ).casefold()
 
 
 def _load_field_keywords_json(value: str | None) -> list[str]:
@@ -1533,796 +2783,6 @@ def _flatten_mineru_output_dir(result: Any, *, artifact_dir: Path, mineru_pdf_pa
     return _rewrite_model_path_prefixes(result, relocations)
 
 
-def _normalize_markdown_artifacts(artifact_dir: Path) -> None:
-    for markdown_path in artifact_dir.glob("*.md"):
-        try:
-            markdown = markdown_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        normalized = _replace_html_tables_with_text(markdown)
-        normalized = _replace_markdown_with_paddle_text_if_available(markdown_path, normalized)
-        normalized = _split_trailing_footer_after_markdown_table(normalized)
-        normalized = _merge_markdown_peripheral_text(markdown_path, normalized)
-        normalized = _append_markdown_seal_section(markdown_path, normalized)
-        if normalized != markdown:
-            markdown_path.write_text(normalized, encoding="utf-8")
-
-
-def _replace_html_tables_with_text(markdown: str) -> str:
-    return re.sub(
-        r"<table\b[^>]*>.*?</table>",
-        lambda match: "\n\n" + _html_table_to_text(match.group(0), context_text=markdown) + "\n\n",
-        markdown,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-
-def _replace_markdown_with_paddle_text_if_available(markdown_path: Path, markdown: str) -> str:
-    artifact_path = markdown_path.with_name("paddle_table_structure.json")
-    if not artifact_path.exists():
-        return markdown
-    try:
-        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return markdown
-    if not isinstance(payload, Mapping):
-        return markdown
-
-    provider = str(payload.get("provider") or "")
-    mode = str(payload.get("mode") or "")
-
-    table_markdowns = _paddle_table_markdown_blocks(payload)
-    if table_markdowns:
-        return _replace_markdown_table_blocks(markdown, table_markdowns)
-
-    lines = _paddle_markdown_body_lines(payload)
-    if not lines:
-        return markdown
-
-    if provider == "paddleocr_ppocrv5_paddleocr_vl_seal" or mode == "seal_vl_crops_ppocrv5":
-        return "\n\n".join(lines).strip() + "\n"
-
-    if provider.startswith("paddleocr_ppocrv5") or mode == "ppocrv5":
-        return "\n\n".join(lines).strip() + "\n"
-
-    return markdown
-
-
-def _paddle_markdown_body_lines(payload: Mapping[str, Any]) -> list[str]:
-    text_blocks_by_page = payload.get("text_blocks_by_page")
-    if not isinstance(text_blocks_by_page, Mapping):
-        return []
-
-    lines: list[str] = []
-    for _, raw_blocks in sorted(
-        text_blocks_by_page.items(),
-        key=lambda item: _safe_int(item[0]),
-    ):
-        if not isinstance(raw_blocks, list):
-            continue
-        blocks = [
-            block
-            for block in raw_blocks
-            if isinstance(block, Mapping)
-            and str(block.get("block_type") or "").strip().lower() != "seal_text"
-        ]
-        blocks.sort(key=_markdown_block_sort_key)
-        unique_blocks: list[Mapping[str, Any]] = []
-        seen: set[tuple[str, int, int, int, int]] = set()
-        for block in blocks:
-            text = _normalize_markdown_body_line(str(block.get("text") or ""))
-            if not text:
-                continue
-            dedupe_key = _paddle_text_block_dedupe_key(block, text)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            unique_blocks.append(block)
-
-        for row_blocks in _group_paddle_text_blocks_by_row(unique_blocks):
-            line = _render_paddle_text_row(row_blocks)
-            if line:
-                lines.append(line)
-    return lines
-
-
-def _paddle_text_block_dedupe_key(
-    block: Mapping[str, Any],
-    text: str,
-) -> tuple[str, int, int, int, int]:
-    x, y, w, h = _markdown_block_box(block)
-    return (text, x // 4, y // 4, max(1, w) // 4, max(1, h) // 4)
-
-
-def _group_paddle_text_blocks_by_row(
-    blocks: list[Mapping[str, Any]],
-) -> list[list[Mapping[str, Any]]]:
-    rows: list[list[Mapping[str, Any]]] = []
-    for block in sorted(blocks, key=_markdown_block_sort_key):
-        if not rows or not _paddle_text_block_belongs_to_row(rows[-1], block):
-            rows.append([block])
-            continue
-        rows[-1].append(block)
-        rows[-1].sort(key=_markdown_block_sort_key)
-    return rows
-
-
-def _paddle_text_block_belongs_to_row(
-    row_blocks: list[Mapping[str, Any]],
-    block: Mapping[str, Any],
-) -> bool:
-    if not row_blocks:
-        return False
-
-    row_centers: list[float] = []
-    row_heights: list[int] = []
-    for row_block in row_blocks:
-        _, y, _, h = _markdown_block_box(row_block)
-        row_centers.append(y + h / 2.0)
-        row_heights.append(max(1, h))
-
-    _, candidate_y, _, candidate_h = _markdown_block_box(block)
-    candidate_center = candidate_y + candidate_h / 2.0
-
-    average_height = max(1, int(sum(row_heights) / len(row_heights)))
-    row_center = sum(row_centers) / len(row_centers)
-
-    center_tolerance = max(10.0, min(average_height, max(1, candidate_h)) * 0.65)
-    return abs(candidate_center - row_center) <= center_tolerance
-
-
-def _render_paddle_text_row(row_blocks: list[Mapping[str, Any]]) -> str:
-    fragments = [
-        _normalize_markdown_body_line(str(block.get("text") or ""))
-        for block in sorted(row_blocks, key=_markdown_block_sort_key)
-    ]
-    parts = [fragment for fragment in fragments if fragment]
-    if not parts:
-        return ""
-    if len(parts) == 1:
-        return parts[0]
-    return " | ".join(parts)
-
-
-def _paddle_table_markdown_blocks(payload: Mapping[str, Any]) -> list[str]:
-    tables_by_page = payload.get("tables_by_page")
-    if not isinstance(tables_by_page, Mapping):
-        return []
-
-    markdown_blocks: list[str] = []
-    for _, raw_tables in sorted(
-        tables_by_page.items(),
-        key=lambda item: _safe_int(item[0]),
-    ):
-        if not isinstance(raw_tables, list):
-            continue
-        tables = [table for table in raw_tables if isinstance(table, Mapping)]
-        tables.sort(key=_markdown_block_sort_key)
-        for table in tables:
-            rows = _paddle_table_rows(table)
-            if not rows:
-                continue
-            markdown = _render_markdown_table(rows).strip()
-            if markdown:
-                markdown_blocks.append(markdown)
-    return markdown_blocks
-
-
-def _paddle_table_rows(table: Mapping[str, Any]) -> list[list[str]]:
-    raw_cells = table.get("cells")
-    if not isinstance(raw_cells, list):
-        return []
-
-    grouped_cells: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
-    row_positions: dict[int, int] = {}
-    for raw_cell in raw_cells:
-        if not isinstance(raw_cell, Mapping):
-            continue
-        row_index = _safe_int(raw_cell.get("row_index"))
-        grouped_cells[row_index].append(raw_cell)
-        bbox = raw_cell.get("bounding_box")
-        y = _safe_int(bbox.get("y")) if isinstance(bbox, Mapping) else 0
-        row_positions[row_index] = min(row_positions.get(row_index, y), y)
-
-    if not grouped_cells:
-        return []
-
-    rows: list[list[str]] = []
-    for row_index in sorted(grouped_cells, key=lambda idx: (idx, row_positions.get(idx, 0))):
-        sorted_cells = sorted(
-            grouped_cells[row_index],
-            key=lambda cell: _paddle_table_cell_sort_key(cell),
-        )
-        row: list[str] = []
-        for cell in sorted_cells:
-            text = _normalize_markdown_table_cell(str(cell.get("text") or ""))
-            span = max(1, _safe_int(cell.get("col_span")))
-            row.append(text)
-            if span > 1:
-                row.extend("" for _ in range(span - 1))
-        if any(cell for cell in row):
-            rows.append(row)
-    _sanitize_semantic_markdown_table_rows(rows)
-    return rows
-
-
-def _paddle_table_cell_sort_key(cell: Mapping[str, Any]) -> tuple[int, int, int]:
-    bbox = cell.get("bounding_box")
-    x = _safe_int(bbox.get("x")) if isinstance(bbox, Mapping) else 0
-    return (x, _safe_int(cell.get("col_index")), _safe_int(cell.get("row_index")))
-
-
-def _replace_markdown_table_blocks(markdown: str, table_markdowns: list[str]) -> str:
-    if not table_markdowns:
-        return markdown
-
-    table_pattern = re.compile(
-        r"(?ms)(^\|.*\|\s*$\n^\|(?:\s*:?-{3,}:?\s*\|)+\s*$\n(?:^\|.*\|\s*$\n?)*)"
-    )
-    index = 0
-
-    def _replace(match: re.Match[str]) -> str:
-        nonlocal index
-        if index >= len(table_markdowns):
-            return match.group(0)
-        replacement = table_markdowns[index]
-        index += 1
-        return replacement + "\n"
-
-    updated = table_pattern.sub(_replace, markdown)
-    if index == 0:
-        return markdown
-    return updated
-
-
-def _split_trailing_footer_after_markdown_table(markdown: str) -> str:
-    return re.sub(r"\|(?=https?://)", "|\n\n", markdown)
-
-
-def _markdown_block_sort_key(block: Mapping[str, Any]) -> tuple[int, int]:
-    x, y, _, _ = _markdown_block_box(block)
-    return (y, x)
-
-
-def _markdown_block_box(block: Mapping[str, Any]) -> tuple[int, int, int, int]:
-    bbox = block.get("bounding_box")
-    if not isinstance(bbox, Mapping):
-        return (0, 0, 0, 0)
-    return (
-        _safe_int(bbox.get("x")),
-        _safe_int(bbox.get("y")),
-        max(0, _safe_int(bbox.get("w"))),
-        max(0, _safe_int(bbox.get("h"))),
-    )
-
-
-def _normalize_markdown_body_line(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
-    normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
-    normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
-    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
-    return normalized
-
-
-def _safe_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _merge_markdown_peripheral_text(markdown_path: Path, markdown: str) -> str:
-    content_list_path = markdown_path.with_name(f"{markdown_path.stem}_content_list.json")
-    if not content_list_path.exists():
-        return markdown
-    try:
-        payload = json.loads(content_list_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return markdown
-
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        raw_items = payload.get("content_list") or payload.get("items")
-        items = raw_items if isinstance(raw_items, list) else []
-    else:
-        items = []
-
-    headers = _extract_peripheral_lines(items, item_types={"header", "page_header"})
-    footers = _extract_peripheral_lines(items, item_types={"footer", "page_footer", "page_number"})
-
-    header_lines = [line for line in headers if line and line not in markdown]
-    footer_lines = [line for line in footers if line and line not in markdown]
-    if not header_lines and not footer_lines:
-        return markdown
-
-    pieces: list[str] = []
-    if header_lines:
-        pieces.append("\n".join(header_lines))
-    pieces.append(markdown.strip("\n"))
-    if footer_lines:
-        pieces.append("\n".join(footer_lines))
-    return "\n\n".join(piece for piece in pieces if piece) + "\n"
-
-
-def _append_markdown_seal_section(markdown_path: Path, markdown: str) -> str:
-    seal_lines = _collect_markdown_seal_lines(markdown_path)
-    if not seal_lines:
-        return markdown
-
-    inline_seal_lines = _collect_inline_markdown_seal_lines(markdown_path)
-    body = _strip_existing_markdown_seal_section(markdown)
-    body = _strip_inline_markdown_seal_content(
-        body,
-        seal_lines=[*seal_lines, *inline_seal_lines],
-        seal_image_paths=_collect_markdown_seal_image_paths(markdown_path),
-    )
-    section = "\u5370\u7ae0\uff1a\n\n" + "\n\n".join(seal_lines)
-    return body.strip("\n") + "\n\n" + section + "\n"
-
-
-def _strip_existing_markdown_seal_section(markdown: str) -> str:
-    match = re.search(r"(?:^|\n{2,})\s*\u5370\u7ae0[:\uff1a]\s*\n.*\Z", markdown, flags=re.DOTALL)
-    if match is None:
-        return markdown
-    return markdown[: match.start()]
-
-
-def _collect_markdown_seal_lines(markdown_path: Path) -> list[str]:
-    paddle_artifact_path = markdown_path.with_name("paddle_table_structure.json")
-    paddle_lines = _dedupe_markdown_seal_lines(
-        _collect_seal_lines_from_json_file(paddle_artifact_path)
-    )
-    if paddle_lines:
-        return paddle_lines
-
-    candidates: list[str] = []
-
-    content_list_path = markdown_path.with_name(f"{markdown_path.stem}_content_list.json")
-    candidates.extend(_collect_seal_lines_from_json_file(content_list_path))
-
-    content_list_v2_path = markdown_path.with_name(f"{markdown_path.stem}_content_list_v2.json")
-    candidates.extend(_collect_seal_lines_from_json_file(content_list_v2_path))
-
-    return _dedupe_markdown_seal_lines(candidates)
-
-
-def _collect_inline_markdown_seal_lines(markdown_path: Path) -> list[str]:
-    candidates: list[str] = []
-    for path in (
-        markdown_path.with_name(f"{markdown_path.stem}_content_list.json"),
-        markdown_path.with_name(f"{markdown_path.stem}_content_list_v2.json"),
-    ):
-        candidates.extend(_collect_seal_lines_from_json_file(path))
-    return _dedupe_markdown_seal_lines(candidates)
-
-
-def _dedupe_markdown_seal_lines(candidates: Sequence[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        text = _normalize_markdown_seal_text(candidate)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        deduped.append(text)
-    return deduped
-
-
-def _collect_markdown_seal_image_paths(markdown_path: Path) -> list[str]:
-    image_paths: list[str] = []
-    for path in (
-        markdown_path.with_name(f"{markdown_path.stem}_content_list.json"),
-        markdown_path.with_name(f"{markdown_path.stem}_content_list_v2.json"),
-    ):
-        if not path.exists():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        _collect_seal_image_paths_from_json(payload, image_paths)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for image_path in image_paths:
-        normalized = str(image_path or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def _collect_seal_image_paths_from_json(value: Any, image_paths: list[str]) -> None:
-    if isinstance(value, Mapping):
-        if _json_mapping_is_seal(value):
-            for key in ("img_path", "image_path", "image_uri"):
-                image_path = value.get(key)
-                if image_path is not None:
-                    image_paths.append(str(image_path))
-        for item in value.values():
-            _collect_seal_image_paths_from_json(item, image_paths)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_seal_image_paths_from_json(item, image_paths)
-
-
-def _strip_inline_markdown_seal_content(
-    markdown: str,
-    *,
-    seal_lines: Sequence[str],
-    seal_image_paths: Sequence[str],
-) -> str:
-    seal_texts = {_normalize_markdown_seal_text(line) for line in seal_lines if line}
-    image_tokens = {
-        token
-        for image_path in seal_image_paths
-        for token in (str(image_path).strip(), Path(str(image_path)).name)
-        if token
-    }
-    if not seal_texts and not image_tokens:
-        return markdown
-
-    kept_lines: list[str] = []
-    for line in markdown.splitlines():
-        if _markdown_line_is_seal_image(line, image_tokens):
-            continue
-        if _normalize_markdown_seal_text(line) in seal_texts:
-            continue
-        kept_lines.append(line)
-    stripped = "\n".join(kept_lines)
-    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
-    return stripped + ("\n" if markdown.endswith("\n") else "")
-
-
-def _markdown_line_is_seal_image(line: str, image_tokens: set[str]) -> bool:
-    if not image_tokens:
-        return False
-    match = re.fullmatch(r"\s*!\[[^\]]*]\(([^)]+)\)\s{0,2}\s*", line)
-    if match is None:
-        return False
-    target = match.group(1).strip()
-    return any(token and (target == token or target.endswith(token)) for token in image_tokens)
-
-
-def _collect_seal_lines_from_json_file(path: Path) -> list[str]:
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    lines: list[str] = []
-    _collect_seal_lines_from_json(payload, lines)
-    return lines
-
-
-def _collect_seal_lines_from_json(value: Any, lines: list[str]) -> None:
-    if isinstance(value, Mapping):
-        if _json_mapping_is_seal(value):
-            for text in _extract_json_mapping_texts(value):
-                lines.append(text)
-
-        for key in ("seal_res", "seal_ocr_res"):
-            nested = value.get(key)
-            if isinstance(nested, Mapping):
-                for text in _extract_json_mapping_texts(nested):
-                    lines.append(text)
-
-        for item in value.values():
-            _collect_seal_lines_from_json(item, lines)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_seal_lines_from_json(item, lines)
-
-
-def _json_mapping_is_seal(value: Mapping[str, Any]) -> bool:
-    for key in ("type", "block_type", "label", "block_label"):
-        token = value.get(key)
-        if token is not None and _value_has_markdown_seal_hint(token):
-            return True
-    meta = value.get("meta")
-    return isinstance(meta, Mapping) and any(
-        _value_has_markdown_seal_hint(item) for item in meta.values()
-    )
-
-
-def _extract_json_mapping_texts(value: Mapping[str, Any]) -> list[str]:
-    texts: list[str] = []
-    for key in ("text", "content", "block_content", "markdown", "markdown_text"):
-        text = _extract_json_text_value(value.get(key))
-        if text:
-            texts.append(text)
-
-    rec_texts = value.get("rec_texts")
-    if isinstance(rec_texts, list):
-        texts.extend(str(item) for item in rec_texts if item is not None)
-    return texts
-
-
-def _extract_json_text_value(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, (str, int, float)):
-        return str(value)
-    if isinstance(value, Mapping):
-        fragments: list[str] = []
-        _collect_nested_content_text(value, fragments)
-        return " ".join(fragments)
-    if isinstance(value, list):
-        fragments = []
-        for item in value:
-            if isinstance(item, Mapping):
-                _collect_nested_content_text(item, fragments)
-            elif item is not None:
-                fragments.append(str(item))
-        return " ".join(fragments)
-    return str(value)
-
-
-def _value_has_markdown_seal_hint(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return any(token in text for token in ("seal", "stamp", "\u5370\u7ae0", "\u516c\u7ae0", "\u76d6\u7ae0"))
-
-
-def _normalize_markdown_seal_text(text: str) -> str:
-    normalized = re.sub(r"<[^>]+>", " ", str(text or ""))
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    normalized = re.sub(r"^\u5370\u7ae0[:\uff1a]\s*", "", normalized)
-    return normalized.strip()
-
-
-def _extract_peripheral_lines(items: Sequence[Any], *, item_types: set[str]) -> list[str]:
-    candidates: list[tuple[float, float, str]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item_type = str(item.get("type") or "").strip().lower()
-        if item_type not in item_types:
-            continue
-        text = _extract_content_list_text(item)
-        if not text:
-            continue
-        bbox = item.get("bbox")
-        x0 = _coerce_bbox_value(bbox, 0)
-        y0 = _coerce_bbox_value(bbox, 1)
-        candidates.append((y0, x0, text))
-    if not candidates:
-        return []
-
-    lines: list[list[tuple[float, str]]] = []
-    line_ys: list[float] = []
-    for y0, x0, text in sorted(candidates, key=lambda item: (item[0], item[1])):
-        if not lines or abs(y0 - line_ys[-1]) > 16:
-            lines.append([(x0, text)])
-            line_ys.append(y0)
-        else:
-            lines[-1].append((x0, text))
-            line_ys[-1] = (line_ys[-1] + y0) / 2.0
-
-    rendered: list[str] = []
-    for line in lines:
-        texts = [text for _, text in sorted(line, key=lambda item: item[0])]
-        joined = " | ".join(texts)
-        if joined:
-            rendered.append(joined)
-    return rendered
-
-
-def _extract_content_list_text(item: Mapping[str, Any]) -> str:
-    text = item.get("text")
-    if text is None:
-        text = item.get("content")
-    if isinstance(text, Mapping):
-        fragments: list[str] = []
-        _collect_nested_content_text(text, fragments)
-        text = " ".join(fragments)
-    elif isinstance(text, list):
-        fragments = []
-        for value in text:
-            if isinstance(value, Mapping):
-                _collect_nested_content_text(value, fragments)
-            elif value is not None:
-                fragments.append(str(value))
-        text = " ".join(fragments)
-    return re.sub(r"\s+", " ", str(text or "")).strip()
-
-
-def _collect_nested_content_text(value: Any, fragments: list[str]) -> None:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if key in {"text", "content"} and not isinstance(item, (Mapping, list)):
-                if item is not None:
-                    fragments.append(str(item))
-            else:
-                _collect_nested_content_text(item, fragments)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_nested_content_text(item, fragments)
-
-
-def _coerce_bbox_value(bbox: Any, index: int) -> float:
-    if isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes)) and len(bbox) > index:
-        try:
-            return float(bbox[index])
-        except (TypeError, ValueError):
-            return 0.0
-    return 0.0
-
-
-def _html_table_to_text(html: str, *, context_text: str | None = None) -> str:
-    parser = _PlainHtmlTableParser()
-    try:
-        parser.feed(html)
-        parser.close()
-    except Exception:
-        return re.sub(r"<[^>]+>", " ", html)
-    rows: list[list[str]] = []
-    for row in parser.rows:
-        cells = [_normalize_markdown_table_cell(cell) for cell in row]
-        if any(cells):
-            rows.append(cells)
-    _repair_contextual_markdown_table_cells(rows, context_text=context_text)
-    return _render_markdown_table(rows)
-
-
-class _PlainHtmlTableParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.rows: list[list[str]] = []
-        self._current_row: list[str] | None = None
-        self._current_cell: list[str] | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        normalized = tag.lower()
-        if normalized == "tr":
-            self._current_row = []
-        elif normalized in {"td", "th"}:
-            if self._current_row is None:
-                self._current_row = []
-            self._current_cell = []
-
-    def handle_data(self, data: str) -> None:
-        if self._current_cell is not None:
-            self._current_cell.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        normalized = tag.lower()
-        if normalized in {"td", "th"} and self._current_cell is not None:
-            text = re.sub(r"\s+", " ", "".join(self._current_cell)).strip()
-            if self._current_row is None:
-                self._current_row = []
-            self._current_row.append(text)
-            self._current_cell = None
-        elif normalized == "tr" and self._current_row is not None:
-            self.rows.append(self._current_row)
-            self._current_row = None
-
-
-def _render_markdown_table(rows: list[list[str]]) -> str:
-    if not rows:
-        return ""
-    width = max(len(row) for row in rows)
-    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
-    if width <= 1:
-        return "\n".join(row[0] for row in normalized_rows if row[0])
-    header = normalized_rows[0]
-    separator = ["---"] * width
-    body = normalized_rows[1:]
-    lines = [
-        "| " + " | ".join(_escape_markdown_table_cell(cell) for cell in header) + " |",
-        "| " + " | ".join(separator) + " |",
-    ]
-    lines.extend(
-        "| " + " | ".join(_escape_markdown_table_cell(cell) for cell in row) + " |"
-        for row in body
-    )
-    return "\n".join(lines)
-
-
-def _escape_markdown_table_cell(cell: str) -> str:
-    return cell.replace("|", r"\|")
-
-
-def _normalize_markdown_table_cell(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
-    normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
-    normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
-    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
-    return _extract_markdown_context_date(normalized) or normalized
-
-
-def _sanitize_semantic_markdown_table_rows(rows: list[list[str]]) -> None:
-    if len(rows) < 2:
-        return
-    headers = rows[0]
-    image_columns = [
-        index
-        for index, header in enumerate(headers)
-        if "\u4eba\u50cf\u4fe1\u606f" in header or "\u7b7e\u5b57\u4fe1\u606f" in header
-    ]
-    for row in rows[1:]:
-        for col_index in image_columns:
-            if col_index < len(row):
-                row[col_index] = ""
-
-
-def _repair_contextual_markdown_table_cells(rows: list[list[str]], *, context_text: str | None) -> None:
-    if len(rows) < 2:
-        return
-    context_date = _extract_markdown_context_date(context_text or "")
-    if not context_date:
-        return
-    headers = rows[0]
-    time_columns = [
-        index
-        for index, header in enumerate(headers)
-        if "\u8ba4\u8bc1\u65f6\u95f4" in header or "\u5b9e\u540d\u8ba4\u8bc1\u65f6\u95f4" in header
-    ]
-    for col_index in time_columns:
-        values = [row[col_index] for row in rows[1:] if col_index < len(row)]
-        if not any(_looks_like_markdown_date_fragment(value) for value in values):
-            continue
-        for row in rows[1:]:
-            if col_index >= len(row):
-                continue
-            cell_date = _extract_markdown_context_date(row[col_index])
-            if cell_date:
-                row[col_index] = cell_date
-            elif not row[col_index] or _looks_like_markdown_date_fragment(row[col_index]):
-                row[col_index] = context_date
-
-
-def _looks_like_markdown_date_fragment(value: str) -> bool:
-    text = _normalize_markdown_table_cell_without_date(value)
-    if not text:
-        return False
-    if _extract_markdown_context_date(text):
-        return True
-    if any(token in text for token in ("\u5e74", "\u6708", "\u65e5")):
-        return True
-    return bool(re.fullmatch(r"[\dHh/\-. ]{1,10}", text))
-
-
-def _normalize_markdown_table_cell_without_date(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
-    normalized = re.sub(r"(?<=\d)\s+(?=\d)", "", normalized)
-    normalized = re.sub(r"(?<=\d)\s+(?=[\u4e00-\u9fff])", "", normalized)
-    normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=\d)", "", normalized)
-    return normalized
-
-
-def _extract_markdown_context_date(text: str) -> str | None:
-    value = str(text or "")
-    match = re.search(
-        r"((?:19|20)\d{2})\s*[\u5e74/-]\s*(\d{1,2})\s*[\u6708/-]\s*(\d{1,2})\s*\u65e5?",
-        value,
-    )
-    if match:
-        return f"{match.group(1)}\u5e74{int(match.group(2))}\u6708{int(match.group(3))}\u65e5"
-
-    serial_match = re.search(
-        r"\u4e1a\u52a1\u6d41\u6c34\u53f7[:\uff1a]?\S*?((?:19|20)\d{2})(\d{2})(\d{2})",
-        value,
-    )
-    if serial_match:
-        return (
-            f"{serial_match.group(1)}\u5e74"
-            f"{int(serial_match.group(2))}\u6708{int(serial_match.group(3))}\u65e5"
-        )
-    exact_match = re.fullmatch(r"\s*((?:19|20)\d{2})(\d{2})(\d{2})\s*", value)
-    if exact_match:
-        return (
-            f"{exact_match.group(1)}\u5e74"
-            f"{int(exact_match.group(2))}\u6708{int(exact_match.group(3))}\u65e5"
-        )
-    return None
-
-
 def _mineru_output_relocations(old_root: Path, new_root: Path) -> list[tuple[Path, Path]]:
     relocations: list[tuple[Path, Path]] = []
     auto_dir = old_root / "auto"
@@ -2367,20 +2827,13 @@ def _rewrite_path_string(value: str, relocations: list[tuple[Path, Path]]) -> st
     return value
 
 
-def _render_input_page_screenshots(
-    input_path: Path,
+def _render_pdf_page_screenshots(
+    pdf_path: Path,
     *,
     output_dir: Path,
     page_count: int,
     dpi: int,
-    input_type: str = "pdf",
 ) -> ArtifactRef:
-    """Render page screenshots for PDF or image inputs.
-
-    For PDFs: uses pdftoppm to render each page at the requested DPI.
-    For images: copies the image itself as the single-page screenshot (no
-    extra rasterization — the image IS the page).
-    """
     if page_count <= 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = output_dir / "page_manifest.jsonl"
@@ -2388,23 +2841,16 @@ def _render_input_page_screenshots(
         return ArtifactRef(
             kind="page_screenshots_manifest",
             uri=str(manifest_path),
-            meta={"page_count": 0, "dpi": dpi, "input_type": input_type},
+            meta={"page_count": 0, "dpi": dpi},
         )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "page_manifest.jsonl"
-
-    if input_type == "image":
-        return _render_image_screenshot(
-            input_path, output_dir=output_dir, manifest_path=manifest_path
-        )
-
     if dpi <= 0:
         raise ValueError("page_screenshot_dpi must be greater than 0")
     pdftoppm = shutil.which("pdftoppm")
     if pdftoppm is None:
         raise RuntimeError("pdftoppm is required for page screenshot export")
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "page_manifest.jsonl"
     manifest_rows: list[dict[str, Any]] = []
     for page_number in range(1, page_count + 1):
         prefix = output_dir / f"page_{page_number:04d}"
@@ -2420,7 +2866,7 @@ def _render_input_page_screenshots(
             str(dpi),
             "-png",
             "-singlefile",
-            str(input_path),
+            str(pdf_path),
             str(prefix),
         ]
         completed = subprocess.run(command, text=True, capture_output=True, check=False)
@@ -2437,7 +2883,7 @@ def _render_input_page_screenshots(
                 "page_index": page_number - 1,
                 "page_number": page_number,
                 "image_path": str(png_path),
-                "source_pdf": str(input_path),
+                "source_pdf": str(pdf_path),
                 "dpi": dpi,
                 "width": width,
                 "height": height,
@@ -2450,49 +2896,8 @@ def _render_input_page_screenshots(
     return ArtifactRef(
         kind="page_screenshots_manifest",
         uri=str(manifest_path),
-        meta={"page_count": page_count, "dpi": dpi, "output_dir": str(output_dir), "input_type": input_type},
+        meta={"page_count": page_count, "dpi": dpi, "output_dir": str(output_dir)},
     )
-
-
-def _render_image_screenshot(
-    image_path: Path,
-    *,
-    output_dir: Path,
-    manifest_path: Path,
-) -> ArtifactRef:
-    """Use the original image as the single-page screenshot — no re-rendering."""
-    suffix = image_path.suffix.lower()
-    dest_path = output_dir / f"page_0001{suffix}"
-    _unlink_if_exists(dest_path)
-    shutil.copy2(str(image_path), str(dest_path))
-    width, height = _read_image_size(dest_path)
-    manifest_rows = [
-        {
-            "page_index": 0,
-            "page_number": 1,
-            "image_path": str(dest_path),
-            "source_file": str(image_path),
-            "dpi": None,
-            "width": width,
-            "height": height,
-            "note": "original_image_copied_as_screenshot",
-        }
-    ]
-    manifest_path.write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in manifest_rows),
-        encoding="utf-8",
-    )
-    return ArtifactRef(
-        kind="page_screenshots_manifest",
-        uri=str(manifest_path),
-        meta={"page_count": 1, "input_type": "image", "output_dir": str(output_dir)},
-    )
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatible alias kept so external callers don't break
-# ---------------------------------------------------------------------------
-_render_pdf_page_screenshots = _render_input_page_screenshots
 
 
 def _read_image_size(image_path: Path) -> tuple[int | None, int | None]:
@@ -2554,6 +2959,18 @@ def _artifact_uri(artifacts: list[Any], kind: str) -> str | None:
         if isinstance(artifact, dict) and artifact.get("kind") == kind:
             uri = artifact.get("uri")
             return str(uri) if uri is not None else None
+    return None
+
+
+def _result_layout_provider(result: Any) -> str | None:
+    pages = getattr(result, "pages", []) or []
+    if not pages:
+        return None
+    first_page = pages[0]
+    page_meta = getattr(first_page, "page_meta", None)
+    if isinstance(page_meta, Mapping):
+        provider = page_meta.get("layout_provider")
+        return str(provider) if provider is not None else None
     return None
 
 

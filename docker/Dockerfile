@@ -1,22 +1,18 @@
-# CUDA 13.0 is the default for RTX 50-series hosts with recent NVIDIA drivers.
+# syntax=docker/dockerfile:1.7
+
+# CUDA 11.8 is the conservative default for older NVIDIA drivers such as 535.xx.
 # The image intentionally uses two Python virtualenvs:
 # - /opt/venvs/mineru: MinerU + Torch + platform_foundation
 # - /opt/venvs/paddle: PaddleOCR + Paddle GPU + platform_foundation Paddle API
 #
 # Keeping Paddle and Torch in separate environments avoids the cuDNN/NCCL wheel
 # conflicts seen when installing both stacks into a single Python environment.
-
-ARG BASE_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu22.04
-FROM ${BASE_IMAGE}
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
-ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
-ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-ARG MINERU_VERSION=3.4.0
-ARG TORCH_VERSION=2.10.0+cu130
-ARG TORCHVISION_VERSION=0.25.0+cu130
-ARG TORCHAUDIO_VERSION=2.10.0+cu130
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu118
+ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu118/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,21 +24,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MINERU_API_PORT=8000 \
     MINERU_API_URL=http://127.0.0.1:8000 \
     MINERU_API_MAX_CONCURRENT_REQUESTS=128 \
-    MINERU_API_PRELOAD=true \
-    MINERU_API_ENABLE_VLM_PRELOAD=true \
-    MINERU_API_STARTUP_TIMEOUT_SECONDS=1800 \
-    MINERU_VLM_GPU_MEMORY_UTILIZATION=0.45 \
     PADDLE_TABLE_API_HOST=0.0.0.0 \
     PADDLE_TABLE_API_PORT=8200 \
     PADDLE_TABLE_API_URL=http://127.0.0.1:8200 \
     PADDLE_TABLE_API_PRELOAD=true \
-    PADDLE_TABLE_API_PRELOAD_MODES=table_structure \
-    PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS= \
+    PADDLE_TABLE_API_PRELOAD_MODES=layout,ocr,table \
     ENABLE_PADDLE_API=true \
-    CUDA_HOME=/usr/local/cuda \
-    CUDA_PATH=/usr/local/cuda \
-    CC=/usr/bin/gcc \
-    CXX=/usr/bin/g++ \
     XDG_CACHE_HOME=/workspace/.cache \
     HF_HOME=/workspace/.cache/huggingface \
     MODELSCOPE_CACHE=/workspace/.cache/modelscope \
@@ -51,12 +38,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential \
-        gcc \
-        g++ \
-        make \
-        ninja-build \
-        pkg-config \
         bash \
         ca-certificates \
         curl \
@@ -70,15 +51,9 @@ RUN apt-get update \
         libxrender1 \
         poppler-utils \
         python3 \
-        python3-dev \
-        python3.10-dev \
         python3-pip \
         python3-venv \
         tini \
-        cuda-nvcc-13-0 \
-        cuda-cudart-dev-13-0 \
-        libcurand-13-0 \
-        libcurand-dev-13-0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/venvs/mineru \
@@ -86,15 +61,15 @@ RUN python3 -m venv /opt/venvs/mineru \
     && /opt/venvs/mineru/bin/python -m pip install -U pip setuptools wheel \
     && /opt/venvs/paddle/bin/python -m pip install -U pip setuptools wheel
 
-# MinerU/Torch environment. Torch is installed from a CUDA wheel index that supports RTX 50-series.
+# MinerU/Torch environment. Torch is installed from the CUDA 11.8 PyTorch wheel index.
 RUN /opt/venvs/mineru/bin/python -m pip install \
         --index-url "${PYTORCH_INDEX_URL}" \
-        torch=="${TORCH_VERSION}" \
-        torchvision=="${TORCHVISION_VERSION}" \
-        torchaudio=="${TORCHAUDIO_VERSION}" \
+        torch==2.6.0+cu118 \
+        torchvision==0.21.0+cu118 \
+        torchaudio==2.6.0+cu118 \
     && /opt/venvs/mineru/bin/python -m pip install \
         -i "${PIP_INDEX_URL}" \
-        "mineru[all]==${MINERU_VERSION}" \
+        mineru==3.1.6 \
         daft==0.7.11 \
         fastapi==0.136.1 \
         uvicorn==0.46.0
@@ -116,21 +91,14 @@ COPY . /opt/mineru_workspace
 RUN /opt/venvs/mineru/bin/python -m pip install -e /opt/mineru_workspace/backend/foundation \
     && /opt/venvs/paddle/bin/python -m pip install -e "/opt/mineru_workspace/backend/foundation[paddle-api]" \
     && mkdir -p /workspace/input /workspace/output /workspace/.cache /workspace/logs /workspace/run \
-    && chmod +x /opt/mineru_workspace/docker/entrypoint.sh \
-    && chmod +x /opt/mineru_workspace/docker/operator-batch.sh \
-    && ln -sf /opt/mineru_workspace/docker/operator-batch.sh /usr/local/bin/mineru-operator-batch
+    && chmod +x /opt/mineru_workspace/docker/entrypoint.sh
 
-ENV ENABLE_PAGE_SCREENSHOTS=false \
-    PAGE_SCREENSHOT_DPI=144
-
-ENV PATH=/usr/local/cuda/bin:/opt/venvs/mineru/bin:${PATH}
-
+ENV PATH=/opt/venvs/mineru/bin:${PATH}
 WORKDIR /workspace
 
 EXPOSE 8000 8200
-
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/mineru_workspace/docker/entrypoint.sh"]
 CMD ["server"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=1800s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD /opt/mineru_workspace/docker/entrypoint.sh healthcheck

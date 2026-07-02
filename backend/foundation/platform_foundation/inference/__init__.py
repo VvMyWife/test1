@@ -12,6 +12,7 @@ from .mineru import (
     parse_mineru_middle_json,
     parse_mineru_table_candidates_json,
 )
+from .paddle_document import PaddleDocumentService, paddle_document_cache_info, warmup_paddle_document_models
 from .paddle_table import (
     PaddleTableApiClient,
     PaddleTableStructureError,
@@ -33,9 +34,11 @@ __all__ = [
     "MinerUPageResult",
     "MinerUServiceError",
     "PaddleTableApiClient",
+    "PaddleDocumentService",
     "PaddleTableStructureError",
     "PaddleTableStructureResult",
     "PaddleTableStructureService",
+    "paddle_document_cache_info",
     "paddle_table_cache_info",
     "paddle_table_result_from_payload",
     "paddle_table_result_to_payload",
@@ -43,5 +46,6 @@ __all__ = [
     "parse_mineru_middle_json",
     "parse_mineru_table_candidates_json",
     "parse_paddle_structure_tables",
+    "warmup_paddle_document_models",
     "warmup_paddle_table_models",
 ]

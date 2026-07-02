@@ -18,6 +18,11 @@ logs/
 run/
 .cache/
 scratch/
+case_images/
+remote_cases/
+paddle_layout_0198_gpu3_light/
+tmp_*.png
+platform-core-public/
 
 # Local virtual environments and editor state.
 .venv/

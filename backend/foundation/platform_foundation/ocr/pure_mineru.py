@@ -5,17 +5,26 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+import json
+import urllib.error
+import urllib.request
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..contracts import ArtifactRef, DocumentItem, ParsedPdf, TableBlock, TextBlock
+from ..inference.paddle_document import PaddleDocumentService
 from ..operators import LayoutExtractMinerUOperator, LayoutExtractMinerUPaddleTableOperator
 from .mineru_layout import MinerULayoutOperateResult, operate
 
 DEFAULT_MINERU_API_URL = "http://127.0.0.1:18000"
 DEFAULT_TIMEOUT_SECONDS = 1800.0
-DEFAULT_HYBRID_EFFORT = "medium"
-SUPPORTED_TABLE_ENGINES = {"ocr", "ocr_pipeline", "ocr_vl", "ocr_hybrid", "paddle"}
+
+
+class PaddleDocumentAPIError(RuntimeError):
+    def __init__(self, message: str, *, code: str | None = None, detail: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.detail = dict(detail or {})
 
 
 class MinerUPdfPage(BaseModel):
@@ -46,17 +55,8 @@ class MinerUPdfResult(BaseModel):
     pages: list[MinerUPdfPage] = Field(default_factory=list)
 
 
-class MinerUTableEngineResolution(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    requested_table_engine: str
-    canonical_table_engine: str
-    mineru_backend: str
-    extra_args_suffix: list[str] = Field(default_factory=list)
-
-
 def extract_pdf(
-    input_path: str | Path,
+    pdf_path: str | Path,
     *,
     output_dir: str | Path | None = None,
     api_url: str | None = None,
@@ -66,14 +66,14 @@ def extract_pdf(
     lang: str = "ch",
     extra_args: Sequence[str] | None = None,
     table_engine: str = "ocr",
-    paddle_table_mode: str = "auto",
+    paddle_table_mode: str = "ppstructurev3",
     paddle_device: str | None = None,
     mineru_options: Mapping[str, Any] | None = None,
     operator_factory: Callable[[], LayoutExtractMinerUOperator] = LayoutExtractMinerUPaddleTableOperator,
 ) -> MinerUPdfResult:
-    """Extract one local file (PDF, PNG, JPG, BMP, TIFF) and return a business-field-free MinerU result."""
+    """Extract one local PDF and return a business-field-free MinerU result."""
 
-    resolved_input = Path(input_path).expanduser().resolve()
+    resolved_pdf = Path(pdf_path).expanduser().resolve()
     options = _build_mineru_options(
         output_dir=output_dir,
         api_url=api_url,
@@ -87,9 +87,34 @@ def extract_pdf(
         paddle_device=paddle_device,
         mineru_options=mineru_options,
     )
-    document = _build_internal_document(resolved_input, mineru_options=options)
+    if str(options.get("table_engine") or table_engine).strip().lower() == "paddle":
+        api_url = _resolve_paddle_api_url(options)
+        if api_url:
+            return _extract_pdf_via_paddle_api(
+                resolved_pdf,
+                options=options,
+                api_url=api_url,
+            )
+        return extract_pdf_with_paddle(
+            resolved_pdf,
+            options=options,
+        )
+    document = _build_internal_document(resolved_pdf, mineru_options=options)
     result = operate(document, mineru_options=options, operator_factory=operator_factory)
-    return to_pure_mineru_result(result, source_pdf=resolved_input)
+    return to_pure_mineru_result(result, source_pdf=resolved_pdf)
+
+
+def extract_pdf_with_paddle(
+    pdf_path: str | Path,
+    *,
+    options: Mapping[str, Any],
+) -> MinerUPdfResult:
+    resolved_pdf = Path(pdf_path).expanduser().resolve()
+    parsed = PaddleDocumentService().parse_document(
+        file_uri=str(resolved_pdf),
+        options=options,
+    )
+    return _to_pure_result_from_parsed(parsed, source_pdf=resolved_pdf)
 
 
 def to_pure_mineru_result(
@@ -97,15 +122,15 @@ def to_pure_mineru_result(
     *,
     source_pdf: str | Path,
 ) -> MinerUPdfResult:
-    resolved_source = Path(source_pdf).expanduser().resolve()
+    resolved_pdf = Path(source_pdf).expanduser().resolve()
     return MinerUPdfResult(
-        source_pdf=str(resolved_source),
-        source_file_name=resolved_source.name,
+        source_pdf=str(resolved_pdf),
+        source_file_name=resolved_pdf.name,
         page_count=result.page_count,
         coord_space=result.coord_space,
         layout_ref=result.layout_ref,
         artifacts=result.artifacts,
-        parsed_pdf=result.parsed_pdf.model_copy(update={"pdf_path": str(resolved_source)}),
+        parsed_pdf=result.parsed_pdf.model_copy(update={"pdf_path": str(resolved_pdf)}),
         pages=[
             MinerUPdfPage(
                 page_index=page.page_index,
@@ -116,6 +141,34 @@ def to_pure_mineru_result(
                 layout_ref=page.layout_ref,
             )
             for page in result.pages
+        ],
+    )
+
+
+def _to_pure_result_from_parsed(
+    parsed: Any,
+    *,
+    source_pdf: str | Path,
+) -> MinerUPdfResult:
+    resolved_pdf = Path(source_pdf).expanduser().resolve()
+    return MinerUPdfResult(
+        source_pdf=str(resolved_pdf),
+        source_file_name=resolved_pdf.name,
+        page_count=parsed.page_count,
+        coord_space=str(parsed.coord_space.value if hasattr(parsed.coord_space, "value") else parsed.coord_space),
+        layout_ref=parsed.middle_json_ref,
+        artifacts=list(parsed.artifacts),
+        parsed_pdf=parsed.parsed_pdf.model_copy(update={"pdf_path": str(resolved_pdf)}),
+        pages=[
+            MinerUPdfPage(
+                page_index=page.page_index,
+                text=page.text,
+                text_blocks=list(page.text_blocks),
+                table_blocks=list(page.table_blocks),
+                page_meta=dict(page.page_meta),
+                layout_ref=parsed.middle_json_ref,
+            )
+            for page in parsed.pages
         ],
     )
 
@@ -143,59 +196,32 @@ def _build_mineru_options(
     options: dict[str, Any] = dict(mineru_options or {})
     if output_dir is not None:
         options["output_dir"] = str(Path(output_dir).expanduser().resolve())
-    resolution = resolve_mineru_table_engine(
-        str(options.get("table_engine") or table_engine or "ocr")
-    )
     options.setdefault("parse_method", parse_method)
-    options.setdefault("backend", resolution.mineru_backend or backend)
+    options.setdefault("backend", backend)
     options.setdefault("lang", lang)
     options.setdefault("timeout_seconds", timeout_seconds)
     options.setdefault("api_url", _resolve_api_url(api_url))
-    options["table_engine"] = resolution.canonical_table_engine
+    resolved_table_engine = str(options.get("table_engine") or table_engine).strip().lower()
+    if resolved_table_engine not in {"ocr", "paddle"}:
+        raise ValueError("table_engine must be 'ocr' or 'paddle'")
+    options["table_engine"] = resolved_table_engine
     if extra_args is None:
-        extra_args_value = ["--formula", "false", "--table", "true"]
+        options.setdefault("extra_args", ["--formula", "false", "--table", "true"])
     else:
-        extra_args_value = list(extra_args)
-    if resolution.extra_args_suffix:
-        existing_args = {str(arg).strip().lower() for arg in extra_args_value}
-        for index, arg in enumerate(resolution.extra_args_suffix):
-            if index % 2 == 0 and str(arg).strip().lower() in existing_args:
-                continue
-            extra_args_value.append(arg)
-    options.setdefault("extra_args", extra_args_value)
-    if resolution.canonical_table_engine == "paddle":
+        options.setdefault("extra_args", list(extra_args))
+    if resolved_table_engine == "paddle":
         options.setdefault("enable_table_cell_refine", True)
         options.setdefault("enable_paddle_table_refine", True)
         options.setdefault("table_cell_refine_fail_open", False)
         options.setdefault("emit_table_cells_as_text_blocks", False)
         options.setdefault("paddle_table_mode", paddle_table_mode)
+        options.setdefault("paddle_vl_version", "1.6")
         if paddle_device:
             options.setdefault("paddle_device", paddle_device)
     else:
         options.setdefault("enable_table_cell_refine", False)
         options.setdefault("enable_paddle_table_refine", False)
     return options
-
-
-def resolve_mineru_table_engine(table_engine: str | None) -> MinerUTableEngineResolution:
-    requested = str(table_engine or "ocr").strip().lower()
-    alias_map = {
-        "ocr": ("ocr", "pipeline", []),
-        "ocr_pipeline": ("ocr", "pipeline", []),
-        "ocr_vl": ("ocr", "vlm-engine", []),
-        "ocr_hybrid": ("ocr", "hybrid-engine", ["--effort", DEFAULT_HYBRID_EFFORT]),
-        "paddle": ("paddle", "pipeline", []),
-    }
-    if requested not in alias_map:
-        supported = "', '".join(sorted(SUPPORTED_TABLE_ENGINES))
-        raise ValueError(f"table_engine must be one of '{supported}'")
-    canonical, backend, extra_args_suffix = alias_map[requested]
-    return MinerUTableEngineResolution(
-        requested_table_engine=requested,
-        canonical_table_engine=canonical,
-        mineru_backend=backend,
-        extra_args_suffix=list(extra_args_suffix),
-    )
 
 
 def _resolve_api_url(api_url: str | None) -> str:
@@ -207,39 +233,86 @@ def _resolve_api_url(api_url: str | None) -> str:
     return DEFAULT_MINERU_API_URL
 
 
+def _resolve_paddle_api_url(options: Mapping[str, Any]) -> str | None:
+    explicit = options.get("paddle_table_api_url")
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    env_value = os.environ.get("PADDLE_TABLE_API_URL")
+    if env_value is not None and env_value.strip():
+        return env_value.strip()
+    return None
+
+
+def _extract_pdf_via_paddle_api(
+    pdf_path: Path,
+    *,
+    options: Mapping[str, Any],
+    api_url: str,
+) -> MinerUPdfResult:
+    endpoint = f"{api_url.rstrip('/')}/api/v1/paddle/document-extract"
+    payload = {
+        "file_uri": str(pdf_path),
+        "output_dir": options.get("output_dir"),
+        "options": dict(options),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        timeout_seconds = float(options.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Paddle document API failed with HTTP {exc.code}: {error_body}") from exc
+    if not response_payload.get("success"):
+        error_payload = response_payload.get("error") or {}
+        if isinstance(error_payload, Mapping):
+            raise PaddleDocumentAPIError(
+                str(error_payload.get("message") or "Paddle document API returned success=false"),
+                code=str(error_payload.get("code")) if error_payload.get("code") is not None else None,
+                detail=error_payload.get("detail") if isinstance(error_payload.get("detail"), Mapping) else None,
+            )
+        raise PaddleDocumentAPIError(str(error_payload or "Paddle document API returned success=false"))
+    return MinerUPdfResult.model_validate(response_payload["data"])
+
+
 def _build_internal_document(
-    input_path: Path,
+    pdf_path: Path,
     *,
     mineru_options: Mapping[str, Any],
 ) -> DocumentItem:
-    doc_id = _safe_doc_id(input_path)
+    doc_id = _safe_doc_id(pdf_path)
     return DocumentItem(
         archive_id="mineru",
         archive_owner_user_id="mineru",
         triggered_by_user_id="mineru",
         doc_id=doc_id,
-        file_uri=str(input_path),
-        mime_type=_resolve_mime_type(input_path),
+        file_uri=str(pdf_path),
+        mime_type=_guess_mime_type(pdf_path),
         meta={"source": "pure_mineru", "mineru_options": dict(mineru_options)},
     )
 
 
-def _resolve_mime_type(file_path: Path) -> str:
-    """Map file suffix to standard MIME type for MinerU processing."""
-    suffix = file_path.suffix.lower()
-    _MIME_MAP: dict[str, str] = {
-        ".pdf": "application/pdf",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".bmp": "image/bmp",
-        ".tif": "image/tiff",
-        ".tiff": "image/tiff",
-    }
-    return _MIME_MAP.get(suffix, "application/octet-stream")
+def _guess_mime_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return "application/pdf"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix in {".tif", ".tiff"}:
+        return "image/tiff"
+    if suffix == ".bmp":
+        return "image/bmp"
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
 
-def _safe_doc_id(file_path: Path) -> str:
-    stem = file_path.stem.strip() or file_path.name
+def _safe_doc_id(pdf_path: Path) -> str:
+    stem = pdf_path.stem.strip() or pdf_path.name
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._")
     return safe or "document"

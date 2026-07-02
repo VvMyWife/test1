@@ -17,24 +17,14 @@ export MINERU_API_URL
 export PADDLE_TABLE_API_URL
 export MINERU_MODEL_SOURCE="${MINERU_MODEL_SOURCE:-modelscope}"
 export MINERU_API_MAX_CONCURRENT_REQUESTS="${MINERU_API_MAX_CONCURRENT_REQUESTS:-128}"
-export MINERU_API_PRELOAD="${MINERU_API_PRELOAD:-${MINERU_API_ENABLE_VLM_PRELOAD:-false}}"
-export MINERU_API_ENABLE_VLM_PRELOAD="${MINERU_API_ENABLE_VLM_PRELOAD:-${MINERU_API_PRELOAD:-false}}"
-export MINERU_API_STARTUP_TIMEOUT_SECONDS="${MINERU_API_STARTUP_TIMEOUT_SECONDS:-1800}"
+export MINERU_API_PRELOAD_RUNTIME="${MINERU_API_PRELOAD_RUNTIME:-false}"
 export PADDLE_TABLE_API_PRELOAD="${PADDLE_TABLE_API_PRELOAD:-true}"
-export PADDLE_TABLE_API_PRELOAD_MODES="${PADDLE_TABLE_API_PRELOAD_MODES:-table_structure}"
-export PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS="${PADDLE_TABLE_API_MAX_CONCURRENT_EXTRACTS:-}"
+export PADDLE_TABLE_API_PRELOAD_MODES="${PADDLE_TABLE_API_PRELOAD_MODES:-layout,ocr,table}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${WORKSPACE_ROOT}/.cache}"
 export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/.cache/huggingface}"
 export MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-${WORKSPACE_ROOT}/.cache/modelscope}"
 export TORCH_HOME="${TORCH_HOME:-${WORKSPACE_ROOT}/.cache/torch}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${WORKSPACE_ROOT}/.cache/pip}"
-export MINERU_VLM_GPU_MEMORY_UTILIZATION="${MINERU_VLM_GPU_MEMORY_UTILIZATION:-0.35}"
-
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-export CUDA_PATH="${CUDA_PATH:-/usr/local/cuda}"
-export CC="${CC:-/usr/bin/gcc}"
-export CXX="${CXX:-/usr/bin/g++}"
-export PATH="${CUDA_HOME}/bin:${MINERU_VENV}/bin:${PATH}"
 
 mkdir -p "${WORKSPACE_ROOT}/input" "${WORKSPACE_ROOT}/output" "${WORKSPACE_ROOT}/logs" "${WORKSPACE_ROOT}/run" "${XDG_CACHE_HOME}"
 
@@ -43,98 +33,6 @@ paddle_pid=""
 
 log() {
   printf '[mineru-docker] %s\n' "$*"
-}
-
-patch_mineru_vlm_memory_utilization() {
-  local target="${MINERU_VENV}/lib/python3.10/site-packages/mineru/backend/vlm/utils.py"
-  if [[ ! -f "${target}" ]]; then
-    log "skip MinerU VLM memory patch; file not found: ${target}"
-    return
-  fi
-
-  MINERU_PATCH_TARGET="${target}" "${MINERU_VENV}/bin/python" - <<'PY'
-import os
-from pathlib import Path
-
-path = Path(os.environ["MINERU_PATCH_TARGET"])
-text = path.read_text(encoding="utf-8")
-old = '    default_gpu_memory_utilization = 0.5\n'
-new = '    default_gpu_memory_utilization = float(os.getenv("MINERU_VLM_GPU_MEMORY_UTILIZATION", "0.45"))\n'
-
-if new in text:
-    raise SystemExit(0)
-if old not in text:
-    raise SystemExit("target pattern not found in MinerU VLM utils.py")
-
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
-PY
-  log "patched MinerU default VLM gpu_memory_utilization=${MINERU_VLM_GPU_MEMORY_UTILIZATION}"
-}
-
-configure_cuda_visible_devices() {
-  local requested="${MINERU_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-auto}}"
-  if [[ "${requested}" != "auto" ]]; then
-    export CUDA_VISIBLE_DEVICES="${requested}"
-    log "using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-    return
-  fi
-
-  unset CUDA_VISIBLE_DEVICES
-  local selected=""
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    selected="$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null \
-      | awk -F, 'BEGIN {max=-1; idx=""} {gsub(/ /, "", $1); gsub(/ /, "", $2); free=$2+0; if (free > max) {max=free; idx=$1}} END {print idx}')"
-  fi
-
-  if [[ -n "${selected}" ]]; then
-    export CUDA_VISIBLE_DEVICES="${selected}"
-    log "auto-selected CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-  else
-    unset CUDA_VISIBLE_DEVICES
-    log "CUDA_VISIBLE_DEVICES auto selection unavailable; leaving all GPUs visible"
-  fi
-}
-
-verify_vlm_build_toolchain() {
-  log "checking VLM build toolchain"
-
-  local missing=0
-
-  if [[ ! -x "${CC}" ]]; then
-    log "WARNING: CC not found or not executable: ${CC}"
-    missing=1
-  fi
-
-  if [[ ! -x "${CXX}" ]]; then
-    log "WARNING: CXX not found or not executable: ${CXX}"
-    missing=1
-  fi
-
-  if ! command -v ninja >/dev/null 2>&1; then
-    log "WARNING: ninja not found"
-    missing=1
-  fi
-
-  if [[ ! -x "${CUDA_HOME}/bin/nvcc" ]]; then
-    log "WARNING: nvcc not found: ${CUDA_HOME}/bin/nvcc"
-    missing=1
-  fi
-
-  if [[ ! -f /usr/include/python3.10/Python.h ]]; then
-    log "WARNING: Python.h not found: /usr/include/python3.10/Python.h"
-    missing=1
-  fi
-
-  if ! find "${CUDA_HOME}" /usr/include /opt -name curand.h 2>/dev/null | head -n 1 | grep -q .; then
-    log "WARNING: curand.h not found"
-    missing=1
-  fi
-
-  if [[ "${missing}" = "1" ]]; then
-    log "VLM build toolchain check finished with warnings; VLM may fail on first JIT compile"
-  else
-    log "VLM build toolchain check passed"
-  fi
 }
 
 wait_http() {
@@ -166,25 +64,15 @@ start_mineru_api() {
     log "mineru-api already available at ${MINERU_API_URL}"
     return
   fi
-
-  local mineru_device_mode="${MINERU_API_DEVICE_MODE:-${MINERU_DEVICE_MODE:-cuda}}"
-  local vlm_preload="${MINERU_API_ENABLE_VLM_PRELOAD:-${MINERU_API_PRELOAD:-false}}"
-
-  patch_mineru_vlm_memory_utilization
-  verify_vlm_build_toolchain
-
-  log "starting mineru-api at ${MINERU_API_URL} device=${mineru_device_mode} vlm_preload=${vlm_preload}"
-
-  MINERU_DEVICE_MODE="${mineru_device_mode}" "${MINERU_VENV}/bin/mineru-api" \
+  log "starting mineru-api at ${MINERU_API_URL}"
+  "${MINERU_VENV}/bin/mineru-api" \
     --host "${MINERU_API_HOST}" \
     --port "${MINERU_API_PORT}" \
-    --enable-vlm-preload "${vlm_preload}" \
+    --enable-vlm-preload "${MINERU_API_PRELOAD_RUNTIME}" \
     > "${WORKSPACE_ROOT}/logs/mineru-api-${MINERU_API_PORT}.log" 2>&1 &
-
   mineru_pid="$!"
   echo "${mineru_pid}" > "${WORKSPACE_ROOT}/run/mineru-api-${MINERU_API_PORT}.pid"
-
-  wait_http "mineru-api" "${MINERU_API_URL}/health" "${MINERU_API_STARTUP_TIMEOUT_SECONDS:-1800}"
+  wait_http "mineru-api" "${MINERU_API_URL}/health" "${MINERU_API_STARTUP_TIMEOUT_SECONDS:-300}"
 }
 
 start_paddle_api() {
@@ -192,95 +80,85 @@ start_paddle_api() {
     log "paddle-table-api already available at ${PADDLE_TABLE_API_URL}"
     return
   fi
-
-  log "starting paddle-table-api at ${PADDLE_TABLE_API_URL}"
-
+  log "starting paddle-table-api at ${PADDLE_TABLE_API_URL} via ${PADDLE_VENV}/bin/python"
+  log "paddle runtime env: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} MINERU_PADDLE_DEVICE=${MINERU_PADDLE_DEVICE:-<unset>}"
   "${PADDLE_VENV}/bin/python" -m uvicorn \
     platform_foundation.ocr.paddle_table_api:app \
     --host "${PADDLE_TABLE_API_HOST}" \
     --port "${PADDLE_TABLE_API_PORT}" \
     > "${WORKSPACE_ROOT}/logs/paddle-table-api-${PADDLE_TABLE_API_PORT}.log" 2>&1 &
-
   paddle_pid="$!"
   echo "${paddle_pid}" > "${WORKSPACE_ROOT}/run/paddle-table-api-${PADDLE_TABLE_API_PORT}.pid"
+  wait_http "paddle-table-api" "${PADDLE_TABLE_API_URL}/health" "${PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS:-600}"
+  "${MINERU_VENV}/bin/python" - "${PADDLE_TABLE_API_URL}/health" <<'PY'
+import json
+import sys
+import urllib.request
 
-  wait_http "paddle-table-api" "${PADDLE_TABLE_API_URL}/health" "${PADDLE_TABLE_API_STARTUP_TIMEOUT_SECONDS:-1800}"
+url = sys.argv[1]
+with urllib.request.urlopen(url, timeout=5) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+runtime = payload.get("runtime") or {}
+print(
+    "[mineru-docker] paddle-table-api runtime:"
+    f" resolved_device={runtime.get('resolved_device')}"
+    f" source={runtime.get('resolution_source')}"
+    f" python_executable={runtime.get('python_executable')}"
+    f" cuda_visible_devices={runtime.get('cuda_visible_devices')}",
+    flush=True,
+)
+PY
 }
 
 stop_children() {
   set +e
-
   if [[ -n "${paddle_pid}" ]] && kill -0 "${paddle_pid}" 2>/dev/null; then
     kill "${paddle_pid}"
   fi
-
   if [[ -n "${mineru_pid}" ]] && kill -0 "${mineru_pid}" 2>/dev/null; then
     kill "${mineru_pid}"
   fi
 }
-
 trap stop_children EXIT TERM INT
 
 run_batch() {
   start_mineru_api
-
-  local requested_table_engine="${TABLE_ENGINE:-${MINERU_TABLE_ENGINE:-ocr}}"
-
-  for arg in "$@"; do
-    if [[ "${arg}" == "paddle" ]]; then
-      requested_table_engine="paddle"
-      break
-    fi
-  done
-
-  if [[ "${ENABLE_PADDLE_API:-false}" == "true" || "${requested_table_engine}" == "paddle" ]]; then
+  if [[ "${ENABLE_PADDLE_API:-false}" == "true" ]]; then
     start_paddle_api
   fi
-
   shift || true
-
   if [[ "$#" -eq 0 ]]; then
     set -- "${WORKSPACE_ROOT}/input" \
-      --output-dir "${OUTPUT_DIR:-${WORKSPACE_ROOT}/output/${requested_table_engine}}" \
-      --table-engine "${requested_table_engine}" \
-      --concurrency "${CONCURRENCY:-12}" \
+      --output-dir "${WORKSPACE_ROOT}/output" \
+      --table-engine "${TABLE_ENGINE:-ocr}" \
+      --concurrency "${CONCURRENCY:-1}" \
       --overwrite
   fi
-
   cd "${WORKSPACE_ROOT}"
   exec "${MINERU_VENV}/bin/python" "${APP_ROOT}/scripts/run-daft-batch-operate.py" "$@"
 }
 
 case "${1:-server}" in
   server)
-    configure_cuda_visible_devices
     start_mineru_api
-
     if [[ "${ENABLE_PADDLE_API:-false}" == "true" ]]; then
       start_paddle_api
     fi
-
     log "services are running. logs are under ${WORKSPACE_ROOT}/logs"
     wait -n
     ;;
-
   batch)
-    configure_cuda_visible_devices
     run_batch "$@"
     ;;
-
   healthcheck)
     curl -fsS "${MINERU_API_URL}/health" >/dev/null
-
     if [[ "${ENABLE_PADDLE_API:-false}" == "true" ]]; then
       curl -fsS "${PADDLE_TABLE_API_URL}/health" >/dev/null
     fi
     ;;
-
   bash|sh|python|python3)
     exec "$@"
     ;;
-
   *)
     exec "$@"
     ;;
